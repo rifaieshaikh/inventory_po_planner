@@ -1,0 +1,2 @@
+Item Code / SKU,Item Name,Total Sales Qty,Current Stock Qty,Overall Monthly Velocity Qty,Recent Sales Qty,Recent Monthly Velocity Qty,Weighted Velocity Qty,Relevant Velocity Qty,Warning Reason
+VAY G-PROFILE BLACK 10 FT-1250 GRM,VAY G-PROFILE BLACK 10 FT-1250 GRM,160.0,1.0,4.0,160.0,26.666666666666668,19.866666666666667,26.666666666666668,Relevant velocity is more than 5x current stock.

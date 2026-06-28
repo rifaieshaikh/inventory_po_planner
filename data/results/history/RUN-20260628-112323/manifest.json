@@ -1,0 +1,55 @@
+{
+  "run_id": "RUN-20260628-112323",
+  "created_at": "2026-06-28T11:23:23+05:30",
+  "created_at_display": "28-Jun-2026 11:23 AM",
+  "app_version": "",
+  "stock_file": "data/stock/stock.csv",
+  "stock_file_modified_at": "2026-06-28T08:45:31+05:30",
+  "sales_years": [
+    "22-23",
+    "23-24",
+    "24-25",
+    "26-27"
+  ],
+  "sales_files": [
+    {
+      "fy": "22-23",
+      "path": "data/item-wise-sales/22-23/item-wise-sales.csv",
+      "modified_at": "2026-06-28T08:45:31+05:30"
+    },
+    {
+      "fy": "23-24",
+      "path": "data/item-wise-sales/23-24/item-wise-sales.csv",
+      "modified_at": "2026-06-28T08:45:31+05:30"
+    },
+    {
+      "fy": "24-25",
+      "path": "data/item-wise-sales/24-25/item-wise-sales.csv",
+      "modified_at": "2026-06-28T08:45:31+05:30"
+    },
+    {
+      "fy": "26-27",
+      "path": "data/item-wise-sales/26-27/item-wise-sales.csv",
+      "modified_at": "2026-06-28T08:45:38+05:30"
+    }
+  ],
+  "settings": {
+    "recent_period_months": 6,
+    "budget_optimization_enabled": false,
+    "purchase_budget": 0.0,
+    "edge_band_rounding_enabled": true
+  },
+  "summary": {
+    "total_items_analyzed": 270.0,
+    "items_recommended_for_purchase": 11.0,
+    "urgent_items": 0.0,
+    "high_items": 4.0,
+    "total_po_value": 109130.15
+  },
+  "files": {
+    "detailed_item_analysis": "detailed_item_analysis.csv",
+    "optimized_po": "optimized_po.csv",
+    "supplier_ready_po": "supplier_ready_po.csv",
+    "excel_report": "inventory_report.xlsx"
+  }
+}
