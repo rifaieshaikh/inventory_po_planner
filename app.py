@@ -1852,7 +1852,7 @@ def render_data_file_status_page() -> None:
     for fy in file_manager.list_available_sales_years(store_id):
         path = file_manager.get_sales_file_path_for_year(store_id, fy)
         sales_rows.append({"Store ID": store_id, "Store Name": active_store_name(), "FY": fy, "Available": path.exists(), "Last Modified": modified_text(path), "Path": str(path)})
-    stock_path = stock or file_manager.get_stock_file_path_for_year(store_id)
+    stock_path = stock or (file_manager.get_store_stock_dir(store_id) / file_manager.STOCK_FILENAME)
     stock_rows = [{"Store ID": store_id, "Store Name": active_store_name(), "Available": bool(stock), "Last Modified": modified_text(stock), "Path": str(stock_path)}]
     master_rows = []
     for name, path in {
