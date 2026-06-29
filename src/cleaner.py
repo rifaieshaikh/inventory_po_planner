@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from .column_mapper import quantity_candidate_columns, validate_sales_quantity_column
+from .column_mapper import is_total_row_label, quantity_candidate_columns, validate_sales_quantity_column
 from .edge_band_rules import detect_edge_band_size
 from .utils import normalize_text
 
@@ -94,6 +94,7 @@ def clean_sales(df: pd.DataFrame, mapping: dict[str, str | None], fy: str) -> pd
     result["Normalized Item Name"] = result["Item Name"].map(normalize_text)
     result["Item Code / SKU"] = df[code_col].fillna("").astype(str).str.strip() if code_col else ""
     result["Item Code / SKU"] = result["Item Code / SKU"].where(result["Item Code / SKU"].ne(""), result["Normalized Item Name"])
+    result = result[result["Item Name"].ne("") & ~result["Item Name"].map(is_total_row_label)].copy()
     result["Category / Size / Type"] = df[category_col].fillna("").astype(str).str.strip() if category_col else ""
     result["Sales Quantity"] = _to_number(df[qty_col]).fillna(0) if qty_col else 0
     result["Sales Amount"] = _to_number(df[amount_col]).fillna(0) if amount_col else 0
@@ -131,6 +132,7 @@ def clean_stock(df: pd.DataFrame, mapping: dict[str, str | None]) -> pd.DataFram
     result["Normalized Item Name"] = result["Item Name"].map(normalize_text)
     result["Item Code / SKU"] = df[code_col].fillna("").astype(str).str.strip() if code_col else ""
     result["Item Code / SKU"] = result["Item Code / SKU"].where(result["Item Code / SKU"].ne(""), result["Normalized Item Name"])
+    result = result[result["Item Name"].ne("") & ~result["Item Name"].map(is_total_row_label)].copy()
     result["Category / Size / Type"] = df[category_col].fillna("").astype(str).str.strip() if category_col else ""
     result["Current Stock Qty"] = _to_number(df[stock_col]).fillna(0) if stock_col else 0
     result["Purchase Price"] = _to_number(df[price_col]).fillna(0) if price_col else 0

@@ -696,6 +696,62 @@ def render_mapping_viewer(store_id: str, sales_years: list[str], section_prefix:
         st.warning("No mapping.json found for this file.")
 
 
+def store_mapping_configuration_rows(store_id: str, store_name: str) -> list[dict]:
+    rows: list[dict] = []
+
+    stock_mapping_path = file_manager.get_stock_mapping_path(store_id)
+    stock_metadata = read_upload_metadata(file_manager.get_stock_upload_metadata_path(store_id))
+    stock_mapping = load_mapping(stock_mapping_path)
+    if stock_mapping:
+        for field, column in stock_mapping.items():
+            rows.append(
+                {
+                    "Store ID": store_id,
+                    "Store Name": store_name,
+                    "File Type": "Stock",
+                    "FY": "",
+                    "Logical Field": field,
+                    "Uploaded Column": column or "Not Available",
+                    "Original File": stock_metadata.get("original_file_name", ""),
+                    "Uploaded At": stock_metadata.get("uploaded_at", ""),
+                    "Mapping Path": str(stock_mapping_path),
+                }
+            )
+
+    for fy in file_manager.list_available_sales_years(store_id):
+        mapping_path = file_manager.get_sales_mapping_path(store_id, fy)
+        metadata = read_upload_metadata(file_manager.get_sales_upload_metadata_path(store_id, fy))
+        mapping = load_mapping(mapping_path)
+        if not mapping:
+            continue
+        for field, column in mapping.items():
+            rows.append(
+                {
+                    "Store ID": store_id,
+                    "Store Name": store_name,
+                    "File Type": "Item-wise Sales",
+                    "FY": fy,
+                    "Logical Field": field,
+                    "Uploaded Column": column or "Not Available",
+                    "Original File": metadata.get("original_file_name", ""),
+                    "Uploaded At": metadata.get("uploaded_at", ""),
+                    "Mapping Path": str(mapping_path),
+                }
+            )
+    return rows
+
+
+def render_dashboard_mapping_configuration() -> None:
+    store_id, store_name = ensure_active_store()
+    st.subheader("Mapping Configuration")
+    st.caption(f"Selected store: {store_name} ({store_id})")
+    rows = store_mapping_configuration_rows(store_id, store_name)
+    if rows:
+        st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+    else:
+        st.info("No saved mapping configuration found for this store. Upload sales or stock and complete column mapping.")
+
+
 def refresh_report() -> None:
     if stock_path and sales_paths:
         store_id, store_name = ensure_active_store()
@@ -1589,6 +1645,7 @@ def render_dashboard_summary(report: dict | None) -> None:
     render_page_header("Inventory PO Planner", "Purchase Manager Dashboard")
     if report is None:
         st.info("Run analysis from Purchase Planning -> Run Analysis.")
+        render_dashboard_mapping_configuration()
         render_data_file_status_page()
         return
     summary = report["Executive Summary"].copy()
@@ -1610,6 +1667,7 @@ def render_dashboard_summary(report: dict | None) -> None:
         render_kpi_card("PO Value", f"{float(summary_map.get('Total PO value', 0)):,.2f}")
     st.divider()
     st.dataframe(summary, use_container_width=True, hide_index=True)
+    render_dashboard_mapping_configuration()
 
 
 def render_business_recommendations_page(report: dict | None) -> None:

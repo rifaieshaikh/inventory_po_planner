@@ -134,6 +134,15 @@ BAD_QUANTITY_TERMS = [
     "\u20b9",
     "a 1 2",
 ]
+TOTAL_ROW_LABELS = {
+    "TOTAL",
+    "GRANDTOTAL",
+    "SUBTOTAL",
+    "TOTALQTY",
+    "TOTALQUANTITY",
+    "TOTALSTOCK",
+    "TOTALSALES",
+}
 
 OLD_FIELD_TO_LOGICAL = {
     "item_code": "Item Code / SKU",
@@ -178,6 +187,12 @@ def get_optional_fields(file_type: str) -> list[str]:
 def is_bad_quantity_column(column_name: str | None) -> bool:
     norm = _norm(column_name or "")
     return any(_norm(term) and _norm(term) in norm for term in BAD_QUANTITY_TERMS)
+
+
+def is_total_row_label(value: object) -> bool:
+    normalized = normalize_text(value)
+    compact = re.sub(r"[^A-Z0-9]+", "", normalized)
+    return compact in TOTAL_ROW_LABELS
 
 
 def _is_quantity_field(field: str, file_type: str) -> bool:
@@ -316,6 +331,10 @@ def validate_mapping(df: pd.DataFrame, mapping: dict, file_type: str) -> list[di
         blank_count = int(item_blank.sum())
         if blank_count:
             issues.append(_issue("Warning", "Item Name", "Rows with blank Item Name will be dropped.", blank_count, []))
+        total_mask = df[item_col].map(is_total_row_label)
+        total_count = int(total_mask.sum())
+        if total_count:
+            issues.append(_issue("Info", "Item Name", "Rows marked TOTAL will be excluded.", total_count, df.loc[total_mask, item_col].head(5).tolist()))
 
     if key == "sales":
         if not mapping.get("Sales Date") and not mapping.get("Sales Month"):
@@ -425,7 +444,7 @@ def apply_mapping(
     cleaned = cleaned.dropna(how="all")
 
     item = clean_text_series(_series_from_mapping(cleaned, mapping, "Item Name"))
-    keep = item.ne("")
+    keep = item.ne("") & ~item.map(is_total_row_label)
     cleaned = cleaned.loc[keep].copy()
     item = item.loc[keep]
     source_row = source_row.loc[keep]

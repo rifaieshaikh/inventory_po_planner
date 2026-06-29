@@ -5,7 +5,7 @@ from pathlib import Path
 import pandas as pd
 
 from .cleaner import clean_sales, clean_stock
-from .column_mapper import detect_columns, to_number
+from .column_mapper import detect_columns, is_total_row_label, to_number
 from .file_manager import get_sales_year_from_path
 from .utils import normalize_text
 
@@ -55,7 +55,7 @@ def _prepare_standardized_sales(df: pd.DataFrame, fy: str) -> pd.DataFrame:
     result.columns = [str(col).strip().lstrip("\ufeff") for col in result.columns]
     result = result.dropna(how="all")
     result["Item Name"] = result.get("Item Name", "").fillna("").astype(str).str.strip()
-    result = result[result["Item Name"].ne("")].copy()
+    result = result[result["Item Name"].ne("") & ~result["Item Name"].map(is_total_row_label)].copy()
     result["Normalized Item Name"] = result["Item Name"].map(normalize_text)
     if "Item Key" not in result.columns:
         result["Item Key"] = ""
@@ -93,7 +93,7 @@ def _prepare_standardized_stock(df: pd.DataFrame) -> pd.DataFrame:
     result.columns = [str(col).strip().lstrip("\ufeff") for col in result.columns]
     result = result.dropna(how="all")
     result["Item Name"] = result.get("Item Name", "").fillna("").astype(str).str.strip()
-    result = result[result["Item Name"].ne("")].copy()
+    result = result[result["Item Name"].ne("") & ~result["Item Name"].map(is_total_row_label)].copy()
     result["Normalized Item Name"] = result["Item Name"].map(normalize_text)
     if "Item Key" not in result.columns:
         result["Item Key"] = ""
