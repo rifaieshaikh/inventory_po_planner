@@ -1,6 +1,6 @@
 # Project Overview
 
-Inventory PO Planner is a local Streamlit app for purchase managers. It turns stock and item-wise sales CSV files into a purchase recommendation package: dashboard metrics, detailed item analysis, optimized PO lines, supplier-ready PO rows, validation warnings, and an Excel workbook.
+Inventory PO Planner is a local Streamlit app for purchase managers. It turns each store's stock and item-wise sales CSV files into a store-specific purchase recommendation package: dashboard metrics, detailed item analysis, optimized PO lines, supplier-ready PO rows, validation warnings, and an Excel workbook.
 
 ## What The App Solves
 
@@ -16,6 +16,7 @@ The app answers:
 
 ```text
 CSV inputs
+  -> active store selection
   -> file_manager
   -> data_loader
   -> cleaner and column_mapper
@@ -35,10 +36,12 @@ CSV inputs
 `app.py` is the application entry point. At import/startup it:
 
 - Sets Streamlit page config.
-- Ensures `data/`, `data/item-wise-sales/`, `data/stock/`, and `data/exports/` exist.
-- Ensures master-data CSVs exist under `data/master/`.
-- Ensures result directories exist under `data/results/`.
-- Loads the latest saved result into session state if available.
+- Ensures `data/`, `data/master/`, `data/itemwisesales/`, `data/stock/`, and `data/stores/` exist.
+- Ensures `data/master/stores.csv` exists and creates `STORE-0001 / Main Store` when no store exists.
+- Copies old single-store sales and stock files into the default FY/store input folders on first run.
+- Ensures global supplier/category CSVs exist under `data/master/`.
+- Ensures store-specific master files and result directories exist under `data/stores/{STORE_ID}/`.
+- Loads the selected store's latest saved result into session state if available.
 - Builds the sidebar navigation and renders the selected page.
 
 ## Application Layers
@@ -46,7 +49,8 @@ CSV inputs
 | Layer | Files | Responsibility |
 | --- | --- | --- |
 | Streamlit UI | `app.py` | Page rendering, sidebar navigation, data editors, session state, user actions |
-| File persistence | `src/file_manager.py` | Save uploads, locate stock/sales files, ensure data folders |
+| Store master | `src/store_manager.py` | Store creation, editing, activation, store folders, `store.json` |
+| File persistence | `src/file_manager.py` | Save uploads, locate store stock/sales files, ensure data folders, migrate old data |
 | Input mapping | `src/column_mapper.py` | Detect likely source columns and required fields |
 | Input cleaning | `src/cleaner.py`, `src/data_loader.py` | Normalize raw CSV files into consistent sales and stock tables |
 | Analysis | `src/sales_analysis.py`, `src/trend_analysis.py`, `src/stock_analysis.py` | Velocity, consistency, trend, and stock coverage |
@@ -63,6 +67,7 @@ The sidebar defines these sections:
 | Section | Pages |
 | --- | --- |
 | Dashboard | Executive Summary, Business Recommendations |
+| Stores | View Stores, Add Store, Store Data Status |
 | Item-wise Sales | View Sales, Upload Sales |
 | Stock | View Stock, Upload Stock, Bulk Item Update |
 | Categories | View Categories, Add Category, Item Category Mapping, Bulk Category Assignment |
@@ -87,7 +92,7 @@ The planning engine uses sales quantity as the primary metric. Sales amount is r
 
 ### Master Data Overrides
 
-Master files under `data/master/` can override or enrich raw input data:
+Global master files under `data/master/` define stores, suppliers, and categories. Store-specific master files under `data/stores/{STORE_ID}/master/` override or enrich raw input data for that store:
 
 - Item-to-category mappings determine category name and category box quantity.
 - Item-to-supplier mappings determine assigned supplier.
@@ -99,16 +104,16 @@ Master files under `data/master/` can override or enrich raw input data:
 Every analysis run gets a generated ID like `RUN-20260629-085058`. The run is saved under:
 
 ```text
-data/results/history/{RUN_ID}/
+data/stores/{STORE_ID}/results/history/{RUN_ID}/
 ```
 
 The same files are copied to:
 
 ```text
-data/results/latest/
+data/stores/{STORE_ID}/results/latest/
 ```
 
-The app can load `latest` automatically and can load or delete historical runs from the Result History pages.
+The app can load the selected store's `latest` result automatically and can load or delete historical runs for that store from the Result History pages.
 
 ## Current Data Snapshot
 

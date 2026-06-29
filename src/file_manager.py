@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+import json
 import shutil
 from pathlib import Path
 
-from .utils import DATA_DIR, EXPORTS_DIR, SALES_DIR, STOCK_DIR
+from . import store_manager
+from .utils import DATA_DIR, EXPORTS_DIR, SALES_DIR, STOCK_DIR, STORES_DIR
 
 
-SALES_FILENAME = "item-wise-sales.csv"
+SALES_FILENAME = "itemwisesales.csv"
+LEGACY_SALES_FILENAME = "item-wise-sales.csv"
 STOCK_FILENAME = "stock.csv"
+DEFAULT_STOCK_FY = "26-27"
+MIGRATION_NOTE = DATA_DIR / "stores" / ".single_store_migration.json"
 
 
 def ensure_data_dirs() -> None:
@@ -15,10 +20,67 @@ def ensure_data_dirs() -> None:
     SALES_DIR.mkdir(parents=True, exist_ok=True)
     STOCK_DIR.mkdir(parents=True, exist_ok=True)
     EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    STORES_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def get_store_dir(store_id: str) -> Path:
+    return store_manager.get_store_folder(store_id)
+
+
+def get_store_sales_dir(store_id: str) -> Path:
+    return SALES_DIR
+
+
+def get_store_stock_dir(store_id: str) -> Path:
+    return STOCK_DIR
+
+
+def get_sales_store_dir(store_id: str, fy: str) -> Path:
+    return SALES_DIR / str(fy).strip() / str(store_id).strip()
+
+
+def get_stock_store_dir(store_id: str, fy: str) -> Path:
+    return STOCK_DIR / str(fy).strip() / str(store_id).strip()
+
+
+def get_sales_file_path_for_year(store_id: str, fy: str) -> Path:
+    return get_sales_store_dir(store_id, fy) / SALES_FILENAME
+
+
+def get_sales_year_from_path(path: Path) -> str:
+    path = Path(path)
+    if path.parent.parent.parent.name == SALES_DIR.name:
+        return path.parent.parent.name
+    return path.parent.name
+
+
+def get_stock_file_path_for_year(store_id: str, fy: str) -> Path:
+    return get_stock_store_dir(store_id, fy) / STOCK_FILENAME
+
+
+def get_store_master_dir(store_id: str) -> Path:
+    return get_store_dir(store_id) / "master"
+
+
+def get_store_results_dir(store_id: str) -> Path:
+    return get_store_dir(store_id) / "results"
+
+
+def ensure_store_dirs(store_id: str) -> None:
+    ensure_data_dirs()
+    store_dir = get_store_dir(store_id)
+    for path in [
+        store_dir,
+        SALES_DIR,
+        STOCK_DIR,
+        get_store_results_dir(store_id) / "latest",
+        get_store_results_dir(store_id) / "history",
+        get_store_master_dir(store_id),
+    ]:
+        path.mkdir(parents=True, exist_ok=True)
 
 
 def _save_uploaded(uploaded_file, destination: Path) -> Path:
-    ensure_data_dirs()
     destination.parent.mkdir(parents=True, exist_ok=True)
     with destination.open("wb") as output:
         uploaded_file.seek(0)
@@ -26,45 +88,71 @@ def _save_uploaded(uploaded_file, destination: Path) -> Path:
     return destination
 
 
-def save_sales_file(uploaded_file, fy: str) -> Path:
+def save_sales_file(store_id: str, uploaded_file, fy: str) -> Path:
     fy = fy.strip()
     if not fy:
         raise ValueError("Financial year is required before saving a sales file.")
-    return _save_uploaded(uploaded_file, SALES_DIR / fy / SALES_FILENAME)
+    ensure_store_dirs(store_id)
+    return _save_uploaded(uploaded_file, get_sales_file_path_for_year(store_id, fy))
 
 
-def save_stock_file(uploaded_file) -> Path:
-    return _save_uploaded(uploaded_file, STOCK_DIR / STOCK_FILENAME)
+def save_stock_file(store_id: str, uploaded_file, fy: str) -> Path:
+    fy = fy.strip()
+    if not fy:
+        raise ValueError("Financial year is required before saving a stock file.")
+    ensure_store_dirs(store_id)
+    return _save_uploaded(uploaded_file, get_stock_file_path_for_year(store_id, fy))
 
 
-def list_available_sales_years() -> list[str]:
-    ensure_data_dirs()
+def list_available_sales_years(store_id: str) -> list[str]:
+    ensure_store_dirs(store_id)
     years = []
-    for path in SALES_DIR.iterdir():
-        if path.is_dir() and (path / SALES_FILENAME).exists():
-            years.append(path.name)
+    for fy_dir in SALES_DIR.iterdir():
+        if not fy_dir.is_dir():
+            continue
+        store_dir = fy_dir / store_id
+        if (store_dir / SALES_FILENAME).exists() or (store_dir / LEGACY_SALES_FILENAME).exists():
+            years.append(fy_dir.name)
     return sorted(years)
 
 
-def get_sales_file_paths(selected_years: list[str] | None = None) -> list[Path]:
-    ensure_data_dirs()
-    years = selected_years if selected_years is not None else list_available_sales_years()
+def list_available_stock_years(store_id: str) -> list[str]:
+    ensure_store_dirs(store_id)
+    years = []
+    for fy_dir in STOCK_DIR.iterdir():
+        if not fy_dir.is_dir():
+            continue
+        if (fy_dir / store_id / STOCK_FILENAME).exists():
+            years.append(fy_dir.name)
+    return sorted(years)
+
+
+def get_sales_file_paths(store_id: str, selected_years: list[str] | None = None) -> list[Path]:
+    ensure_store_dirs(store_id)
+    years = selected_years if selected_years is not None else list_available_sales_years(store_id)
     paths = []
     for fy in years:
-        path = SALES_DIR / fy / SALES_FILENAME
+        path = get_sales_file_path_for_year(store_id, fy)
+        legacy_path = get_sales_store_dir(store_id, fy) / LEGACY_SALES_FILENAME
         if path.exists():
             paths.append(path)
+        elif legacy_path.exists():
+            paths.append(legacy_path)
     return paths
 
 
-def get_stock_file_path() -> Path | None:
-    ensure_data_dirs()
-    path = STOCK_DIR / STOCK_FILENAME
-    return path if path.exists() else None
+def get_stock_file_path(store_id: str, fy: str | None = None) -> Path | None:
+    ensure_store_dirs(store_id)
+    years = [fy] if fy else list_available_stock_years(store_id)
+    for year in sorted([str(year) for year in years if year], reverse=True):
+        path = get_stock_file_path_for_year(store_id, year)
+        if path.exists():
+            return path
+    return None
 
 
-def delete_sales_year(fy: str) -> None:
-    path = SALES_DIR / fy
+def delete_sales_year(store_id: str, fy: str) -> None:
+    path = get_sales_store_dir(store_id, fy)
     if path.exists() and path.is_dir():
         shutil.rmtree(path)
 
@@ -78,3 +166,125 @@ def describe_file(path: Path | None) -> dict[str, object]:
         "path": path,
         "modified": path.stat().st_mtime,
     }
+
+
+def get_store_data_status(store_id: str) -> dict[str, object]:
+    ensure_store_dirs(store_id)
+    stock_years = list_available_stock_years(store_id)
+    stock = get_stock_file_path(store_id)
+    sales_rows = []
+    for fy in list_available_sales_years(store_id):
+        path = get_sales_file_path_for_year(store_id, fy)
+        if not path.exists():
+            path = get_sales_store_dir(store_id, fy) / LEGACY_SALES_FILENAME
+        sales_rows.append({"FY": fy, "Path": path, "Modified": path.stat().st_mtime if path.exists() else None})
+    stock_rows = []
+    for fy in stock_years:
+        path = get_stock_file_path_for_year(store_id, fy)
+        stock_rows.append({"FY": fy, "Path": path, "Modified": path.stat().st_mtime if path.exists() else None})
+    latest_manifest = get_store_results_dir(store_id) / "latest" / "manifest.json"
+    latest_run_id = ""
+    latest_created_at = ""
+    if latest_manifest.exists():
+        try:
+            manifest = json.loads(latest_manifest.read_text(encoding="utf-8"))
+            latest_run_id = manifest.get("run_id", "")
+            latest_created_at = manifest.get("created_at_display", manifest.get("created_at", ""))
+        except json.JSONDecodeError:
+            latest_run_id = ""
+            latest_created_at = ""
+    return {
+        "stock_exists": bool(stock),
+        "stock_path": stock or get_stock_file_path_for_year(store_id, DEFAULT_STOCK_FY),
+        "stock_modified": stock.stat().st_mtime if stock and stock.exists() else None,
+        "stock_years": stock_years,
+        "stock_files": stock_rows,
+        "sales_years": [row["FY"] for row in sales_rows],
+        "sales_files": sales_rows,
+        "latest_result_exists": latest_manifest.exists(),
+        "latest_run_id": latest_run_id,
+        "latest_created_at": latest_created_at,
+    }
+
+
+def _copy_file_if_missing(source: Path, destination: Path, copied: list[dict[str, str]]) -> None:
+    if source.exists() and source.is_file() and not destination.exists():
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+        copied.append({"source": str(source), "destination": str(destination)})
+
+
+def _copy_tree_if_destination_missing(source: Path, destination: Path, copied: list[dict[str, str]]) -> None:
+    if source.exists() and source.is_dir() and not destination.exists():
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(source, destination)
+        copied.append({"source": str(source), "destination": str(destination)})
+
+
+def _copy_tree_contents_if_missing(source: Path, destination: Path, copied: list[dict[str, str]]) -> None:
+    if not source.exists() or not source.is_dir():
+        return
+    destination.mkdir(parents=True, exist_ok=True)
+    for child in source.iterdir():
+        target = destination / child.name
+        if child.is_dir():
+            _copy_tree_if_destination_missing(child, target, copied)
+            if target.exists():
+                _copy_tree_contents_if_missing(child, target, copied)
+        else:
+            _copy_file_if_missing(child, target, copied)
+
+
+def migrate_single_store_data_to_default_store() -> dict[str, object]:
+    ensure_data_dirs()
+    default_store_id = store_manager.create_default_store_if_missing()
+    ensure_store_dirs(default_store_id)
+
+    copied: list[dict[str, str]] = []
+    legacy_sales_dir = DATA_DIR / "item-wise-sales"
+    for source_sales_dir in [legacy_sales_dir, store_manager.get_store_folder(default_store_id) / "item-wise-sales", SALES_DIR]:
+        if source_sales_dir.exists():
+            for fy_dir in source_sales_dir.iterdir():
+                if not fy_dir.is_dir():
+                    continue
+                source_file = fy_dir / SALES_FILENAME
+                if not source_file.exists():
+                    source_file = fy_dir / LEGACY_SALES_FILENAME
+                if not source_file.exists() and (fy_dir / default_store_id).is_dir():
+                    source_file = fy_dir / default_store_id / SALES_FILENAME
+                    if not source_file.exists():
+                        source_file = fy_dir / default_store_id / LEGACY_SALES_FILENAME
+                _copy_file_if_missing(source_file, get_sales_file_path_for_year(default_store_id, fy_dir.name), copied)
+
+    if SALES_DIR.exists():
+        for fy_dir in SALES_DIR.iterdir():
+            if fy_dir.is_dir():
+                for store_dir in fy_dir.iterdir():
+                    if store_dir.is_dir():
+                        legacy_file = store_dir / LEGACY_SALES_FILENAME
+                        if legacy_file.exists():
+                            _copy_file_if_missing(legacy_file, store_dir / SALES_FILENAME, copied)
+
+    _copy_file_if_missing(STOCK_DIR / STOCK_FILENAME, get_stock_file_path_for_year(default_store_id, DEFAULT_STOCK_FY), copied)
+    old_store_stock = store_manager.get_store_folder(default_store_id) / "stock" / STOCK_FILENAME
+    _copy_file_if_missing(old_store_stock, get_stock_file_path_for_year(default_store_id, DEFAULT_STOCK_FY), copied)
+    legacy_results = DATA_DIR / "results"
+    target_results = get_store_results_dir(default_store_id)
+    if legacy_results.exists() and legacy_results.is_dir():
+        for child in legacy_results.iterdir():
+            target = target_results / child.name
+            if child.is_dir():
+                _copy_tree_if_destination_missing(child, target, copied)
+                _copy_tree_contents_if_missing(child, target, copied)
+            else:
+                _copy_file_if_missing(child, target, copied)
+
+    legacy_master_files = ["discontinued-items.csv", "item-suppliers.csv", "item-categories.csv"]
+    for filename in legacy_master_files:
+        _copy_file_if_missing(DATA_DIR / "master" / filename, get_store_master_dir(default_store_id) / filename, copied)
+
+    if copied:
+        MIGRATION_NOTE.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"default_store_id": default_store_id, "copied": copied}
+        MIGRATION_NOTE.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return {"default_store_id": default_store_id, "copied": copied, "note_path": MIGRATION_NOTE if copied else None}

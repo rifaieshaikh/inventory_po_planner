@@ -8,6 +8,7 @@ import pandas as pd
 from .column_mapper import detect_columns, quantity_candidate_columns
 from .cleaner import choose_sales_quantity_column
 from .data_loader import read_csv_flexible
+from .file_manager import get_sales_year_from_path
 from .utils import normalize_text
 
 
@@ -23,6 +24,7 @@ def raw_sales_debug(paths: list[Path], query: str) -> tuple[pd.DataFrame, pd.Dat
     rows = []
     maps = []
     for path in paths:
+        fy = get_sales_year_from_path(path)
         raw = read_csv_flexible(path)
         mapping = detect_columns(raw.columns, "sales")
         selected_qty = choose_sales_quantity_column(raw, mapping)
@@ -30,7 +32,7 @@ def raw_sales_debug(paths: list[Path], query: str) -> tuple[pd.DataFrame, pd.Dat
         matched = raw[_match_item(raw[item_col], query)] if item_col else raw.head(0)
         maps.append(
             {
-                "FY": path.parent.name,
+                "FY": fy,
                 "File": str(path),
                 "Selected Quantity Column": selected_qty,
                 "Selected Amount Column": mapping.get("sales_amount"),
@@ -40,7 +42,7 @@ def raw_sales_debug(paths: list[Path], query: str) -> tuple[pd.DataFrame, pd.Dat
         )
         if not matched.empty:
             temp = matched.copy()
-            temp.insert(0, "FY", path.parent.name)
+            temp.insert(0, "FY", fy)
             temp.insert(1, "Source File", str(path))
             rows.append(temp)
     raw_rows = pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
