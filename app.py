@@ -1,14 +1,31 @@
 from __future__ import annotations
 
+import json
 import math
+import re
 import time
+from datetime import datetime
+from io import BytesIO
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
 from src import file_manager
-from src.column_mapper import detect_columns, missing_required, validate_sales_quantity_column
+from src.column_mapper import (
+    apply_mapping,
+    detect_column_mapping,
+    detect_columns,
+    get_field_specs,
+    has_blocking_errors,
+    load_mapping,
+    missing_required,
+    normalize_mapping,
+    save_mapping,
+    to_number,
+    validate_mapping,
+    validate_sales_quantity_column,
+)
 from src.data_loader import load_sales_files, load_stock_file, read_csv_flexible
 from src.debug_tools import item_debug_report
 from src.excel_exporter import export_excel
@@ -252,6 +269,431 @@ def mapping_editor(path: Path, data_type: str, key_prefix: str) -> dict[str, str
             if qty_error:
                 st.error(qty_error)
         return mapping
+
+
+def relative_app_path(path: Path | str | None) -> str:
+    if not path:
+        return ""
+    try:
+        return str(Path(path).resolve().relative_to(Path(__file__).resolve().parent))
+    except ValueError:
+        return str(path)
+
+
+def clean_uploaded_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    result = df.copy()
+    result.columns = [str(col).strip().lstrip("\ufeff") for col in result.columns]
+    return result.dropna(how="all")
+
+
+def read_uploaded_csv(data: bytes) -> pd.DataFrame:
+    encodings = ["utf-8", "utf-8-sig", "latin1"]
+    attempts: list[pd.DataFrame] = []
+    last_error: Exception | None = None
+    for encoding in encodings:
+        for kwargs in [{"sep": ","}, {"sep": "\t"}, {"sep": None, "engine": "python"}]:
+            try:
+                attempts.append(pd.read_csv(BytesIO(data), encoding=encoding, **kwargs))
+            except Exception as exc:
+                last_error = exc
+    if attempts:
+        return clean_uploaded_dataframe(max(attempts, key=lambda frame: len(frame.columns)))
+    if last_error:
+        raise last_error
+    raise ValueError("Could not read uploaded CSV.")
+
+
+def read_uploaded_table(uploaded_file, section_prefix: str) -> tuple[pd.DataFrame | None, str | None, list[str]]:
+    warnings: list[str] = []
+    if uploaded_file is None:
+        return None, None, warnings
+    data = uploaded_file.getvalue()
+    suffix = Path(uploaded_file.name).suffix.lower()
+    if suffix in {".xlsx", ".xls"}:
+        try:
+            workbook = pd.ExcelFile(BytesIO(data))
+        except Exception as exc:
+            st.error(f"Could not read Excel workbook: {exc}")
+            return None, None, warnings
+        if not workbook.sheet_names:
+            st.warning("Excel workbook has no sheets.")
+            return None, None, warnings
+        st.caption("Sheets: " + ", ".join(workbook.sheet_names))
+        sheet_name = st.selectbox("Sheet", workbook.sheet_names, key=widget_key(section_prefix, "sheet"))
+        try:
+            df = pd.read_excel(BytesIO(data), sheet_name=sheet_name)
+        except Exception as exc:
+            st.error(f"Could not read selected sheet: {exc}")
+            return None, sheet_name, warnings
+        df = clean_uploaded_dataframe(df)
+        if df.empty:
+            warnings.append("Selected sheet is empty.")
+        return df, sheet_name, warnings
+    try:
+        df = read_uploaded_csv(data)
+    except Exception as exc:
+        st.error(f"Could not read CSV file: {exc}")
+        return None, None, warnings
+    if df.empty:
+        warnings.append("Uploaded file is empty.")
+    return df, None, warnings
+
+
+def mapping_widget_name(field: str) -> str:
+    names = {
+        "Item Name": "map_item_name",
+        "Sales Quantity": "map_sales_qty",
+        "Current Stock Quantity": "map_stock_qty",
+        "Item Code / SKU": "map_item_code",
+        "Sales Date": "map_sales_date",
+        "Sales Month": "map_sales_month",
+        "Category / Size / Type": "map_category",
+        "Selling Price": "map_selling_price",
+        "Sales Amount": "map_sales_amount",
+        "Invoice Number": "map_invoice_number",
+        "Customer Name": "map_customer_name",
+        "Supplier Name": "map_supplier",
+        "Purchase Price": "map_purchase_price",
+        "Unit": "map_unit",
+        "Box Size / Pack Size / MOQ": "map_pack_size",
+        "Stock Value": "map_stock_value",
+        "Location / Rack": "map_location",
+    }
+    return names.get(field, "map_" + re.sub(r"[^a-z0-9]+", "_", field.lower()).strip("_"))
+
+
+def mapping_table(mapping: dict | None) -> pd.DataFrame:
+    normalized = mapping or {}
+    return pd.DataFrame(
+        [{"Logical Field": field, "Uploaded Column": column or "Not Available"} for field, column in normalized.items()]
+    )
+
+
+def template_file_name(template_name: str) -> str:
+    name = re.sub(r"[^A-Za-z0-9._ -]+", "_", str(template_name or "")).strip(" .")
+    if not name:
+        raise ValueError("Template name is required.")
+    return f"{name}.json"
+
+
+def list_mapping_templates(file_type: str) -> list[Path]:
+    template_dir = file_manager.get_mapping_template_dir(file_type)
+    template_dir.mkdir(parents=True, exist_ok=True)
+    return sorted(template_dir.glob("*.json"))
+
+
+def load_template_payload(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def render_mapping_template_loader(file_type: str, df: pd.DataFrame, section_prefix: str) -> dict | None:
+    templates = list_mapping_templates(file_type)
+    if not templates:
+        st.caption("No saved mapping templates yet.")
+        return None
+    labels = ["Do not load template"] + [path.stem for path in templates]
+    selected = st.selectbox("Load mapping template", labels, key=widget_key(section_prefix, "template_select"))
+    if selected == "Do not load template":
+        return None
+    template_path = next((path for path in templates if path.stem == selected), None)
+    if not template_path:
+        return None
+    payload = load_template_payload(template_path)
+    mapping = normalize_mapping(payload.get("mapping", {}), file_type)
+    missing = [column for column in mapping.values() if column and column not in df.columns]
+    if missing:
+        st.warning("Template columns missing in this upload: " + ", ".join(sorted(set(missing))))
+    return {field: (column if column in df.columns else None) for field, column in mapping.items()}
+
+
+def render_mapping_template_actions(file_type: str, mapping: dict, section_prefix: str) -> None:
+    st.markdown("**Mapping Templates**")
+    c1, c2 = st.columns([2, 1])
+    with c1:
+        template_name = st.text_input("Template name", key=widget_key(section_prefix, "template_name"))
+    with c2:
+        if st.button("Save Template", key=widget_key(section_prefix, "save_template")):
+            try:
+                now = datetime.now().astimezone().isoformat(timespec="seconds")
+                template_path = file_manager.get_mapping_template_dir(file_type) / template_file_name(template_name)
+                existing = load_template_payload(template_path)
+                payload = {
+                    "template_name": template_name.strip(),
+                    "file_type": "sales" if file_type == "sales" else "stock",
+                    "mapping": mapping,
+                    "created_at": existing.get("created_at", now),
+                    "updated_at": now,
+                }
+                template_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+                st.success(f"Saved template {template_path.stem}.")
+            except ValueError as exc:
+                st.error(str(exc))
+    templates = list_mapping_templates(file_type)
+    if templates:
+        delete_label = st.selectbox(
+            "Delete mapping template",
+            ["Choose template"] + [path.stem for path in templates],
+            key=widget_key(section_prefix, "delete_template_select"),
+        )
+        if st.button("Delete Template", key=widget_key(section_prefix, "delete_template")):
+            target = next((path for path in templates if path.stem == delete_label), None)
+            if target:
+                target.unlink(missing_ok=True)
+                st.success(f"Deleted template {delete_label}.")
+                st.rerun()
+
+
+def render_issues_table(issues: list[dict]) -> None:
+    if not issues:
+        st.success("Mapping validation passed.")
+        return
+    st.dataframe(
+        pd.DataFrame(issues, columns=["Severity", "Field", "Message", "Row Count", "Example Values"]),
+        hide_index=True,
+        use_container_width=True,
+    )
+    if has_blocking_errors(issues):
+        st.error("Fix mapping errors before saving.")
+    else:
+        st.warning("Warnings are present, but saving is allowed.")
+
+
+def render_column_mapping_step(
+    df: pd.DataFrame,
+    file_type: str,
+    existing_mapping: dict | None = None,
+    section_prefix: str = "",
+) -> dict:
+    st.subheader("Raw File Preview")
+    st.dataframe(df.head(20), hide_index=True, use_container_width=True)
+    st.caption("Uploaded columns: " + ", ".join([str(col) for col in df.columns]))
+
+    detected = detect_column_mapping(df, file_type)
+    mapping = detected.copy()
+    if existing_mapping:
+        mapping.update({field: column for field, column in normalize_mapping(existing_mapping, file_type).items() if column})
+
+    uploaded_columns = [str(col) for col in df.columns]
+    result: dict[str, str | None] = {}
+    required_specs = [spec for spec in get_field_specs(file_type) if spec["required"]]
+    optional_specs = [spec for spec in get_field_specs(file_type) if not spec["required"]]
+
+    st.subheader("Required Fields")
+    for spec in required_specs:
+        field = spec["field"]
+        options = ["Select column"] + uploaded_columns
+        current = mapping.get(field)
+        index = options.index(current) if current in options else 0
+        choice = st.selectbox(field, options, index=index, key=widget_key(section_prefix, mapping_widget_name(field)))
+        result[field] = None if choice == "Select column" else choice
+
+    st.subheader("Optional Fields")
+    for spec in optional_specs:
+        field = spec["field"]
+        options = ["Not Available"] + uploaded_columns
+        current = mapping.get(field)
+        index = options.index(current) if current in options else 0
+        choice = st.selectbox(field, options, index=index, key=widget_key(section_prefix, mapping_widget_name(field)))
+        result[field] = None if choice == "Not Available" else choice
+
+    issues = validate_mapping(df, result, file_type)
+    st.subheader("Validation Warnings / Errors")
+    render_issues_table(issues)
+    st.subheader("Cleaned Standardized Preview")
+    if has_blocking_errors(issues):
+        st.info("Cleaned preview will appear after required mapping errors are fixed.")
+    else:
+        try:
+            preview = apply_mapping(df, result, file_type, {"source_file_name": "preview"})
+            st.dataframe(preview.head(20), hide_index=True, use_container_width=True)
+        except Exception as exc:
+            st.warning(f"Could not build cleaned preview yet: {exc}")
+    return result
+
+
+def category_lookup_for_store(store_id: str) -> dict[str, str]:
+    lookup: dict[str, str] = {}
+    categories = mdm.load_item_categories(store_id)
+    if categories.empty:
+        return lookup
+    for _, row in categories.iterrows():
+        category = str(row.get("Category Name", "")).strip()
+        if not category:
+            continue
+        for key in [
+            row.get("Item Key", ""),
+            row.get("Item Code / SKU", ""),
+            row.get("Item Name", ""),
+        ]:
+            normalized = normalize_text(key)
+            if normalized:
+                lookup[normalized] = category
+    return lookup
+
+
+def save_upload_metadata(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+
+
+def read_upload_metadata(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def warning_count_from_metadata(metadata: dict) -> int:
+    warnings = metadata.get("warnings", [])
+    if not isinstance(warnings, list):
+        return 0
+    return sum(1 for item in warnings if str(item.get("Severity", "")).lower() in {"warning", "error"})
+
+
+def save_standardized_upload(
+    file_type: str,
+    df: pd.DataFrame,
+    mapping: dict,
+    uploaded_file,
+    sheet_name: str | None,
+    fy: str | None,
+    issues: list[dict],
+) -> Path:
+    store_id, store_name = ensure_active_store()
+    file_type_key = "sales" if file_type == "sales" else "stock"
+    context = {
+        "store_id": store_id,
+        "store_name": store_name,
+        "fy": fy or "",
+        "source_file_name": uploaded_file.name,
+        "category_lookup": category_lookup_for_store(store_id),
+    }
+    cleaned = apply_mapping(df, mapping, file_type_key, context)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    if file_type_key == "sales":
+        assert fy is not None
+        target = file_manager.get_sales_file_path_for_year(store_id, fy)
+        mapping_path = file_manager.get_sales_mapping_path(store_id, fy)
+        metadata_path = file_manager.get_sales_upload_metadata_path(store_id, fy)
+        original_dir = file_manager.get_sales_original_dir(store_id, fy)
+    else:
+        target = file_manager.get_stock_file_path_for_year(store_id)
+        mapping_path = file_manager.get_stock_mapping_path(store_id)
+        metadata_path = file_manager.get_stock_upload_metadata_path(store_id)
+        original_dir = file_manager.get_stock_original_dir(store_id)
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    cleaned.to_csv(target, index=False)
+    save_mapping(mapping_path, mapping)
+    original_path = file_manager.save_original_upload(uploaded_file, original_dir, timestamp)
+    metadata = {
+        "store_id": store_id,
+        "store_name": store_name,
+        "file_type": file_type_key,
+        "fy": fy if file_type_key == "sales" else None,
+        "original_file_name": uploaded_file.name,
+        "stored_original_path": relative_app_path(original_path),
+        "standardized_file_path": relative_app_path(target),
+        "mapping_path": relative_app_path(mapping_path),
+        "uploaded_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "sheet_name": sheet_name,
+        "row_count_original": int(len(df)),
+        "row_count_cleaned": int(len(cleaned)),
+        "columns_original": [str(col) for col in df.columns],
+        "columns_standardized": [str(col) for col in cleaned.columns],
+        "warnings": issues,
+    }
+    save_upload_metadata(metadata_path, metadata)
+    return target
+
+
+def standardized_file_issues(path: Path | None, file_type: str) -> list[dict]:
+    if path is None or not path.exists():
+        return [{"Severity": "Error", "Field": "File", "Message": "File is missing.", "Row Count": 0, "Example Values": ""}]
+    try:
+        df = read_csv_flexible(path)
+    except Exception as exc:
+        return [{"Severity": "Error", "Field": "File", "Message": f"File could not be read: {exc}", "Row Count": 0, "Example Values": ""}]
+    columns = set(df.columns)
+    issues: list[dict] = []
+    if file_type == "sales":
+        for col in ["Item Key", "Item Name", "Sales Quantity"]:
+            if col not in columns:
+                issues.append({"Severity": "Error", "Field": col, "Message": f"Missing standardized column: {col}", "Row Count": 0, "Example Values": ""})
+        if "Sales Quantity" in columns:
+            bad = to_number(df["Sales Quantity"]).isna() & df["Sales Quantity"].fillna("").astype(str).str.strip().ne("")
+            if int(bad.sum()):
+                issues.append({"Severity": "Error", "Field": "Sales Quantity", "Message": "Sales Quantity is not numeric.", "Row Count": int(bad.sum()), "Example Values": ", ".join(df.loc[bad, "Sales Quantity"].head(5).astype(str))})
+    else:
+        qty_col = "Current Stock Quantity" if "Current Stock Quantity" in columns else "Current Stock Qty" if "Current Stock Qty" in columns else ""
+        for col in ["Item Key", "Item Name"]:
+            if col not in columns:
+                issues.append({"Severity": "Error", "Field": col, "Message": f"Missing standardized column: {col}", "Row Count": 0, "Example Values": ""})
+        if not qty_col:
+            issues.append({"Severity": "Error", "Field": "Current Stock Quantity", "Message": "Missing standardized column: Current Stock Quantity", "Row Count": 0, "Example Values": ""})
+        else:
+            bad = to_number(df[qty_col]).isna() & df[qty_col].fillna("").astype(str).str.strip().ne("")
+            if int(bad.sum()):
+                issues.append({"Severity": "Error", "Field": "Current Stock Quantity", "Message": "Current Stock Quantity is not numeric.", "Row Count": int(bad.sum()), "Example Values": ", ".join(df.loc[bad, qty_col].head(5).astype(str))})
+    return issues
+
+
+def upload_status_row(file_type: str, store_id: str, store_name: str, fy: str | None = None) -> dict:
+    if file_type == "sales":
+        path = file_manager.get_sales_file_path_for_year(store_id, fy or "")
+        mapping_path = file_manager.get_sales_mapping_path(store_id, fy or "")
+        metadata_path = file_manager.get_sales_upload_metadata_path(store_id, fy or "")
+    else:
+        path = file_manager.get_stock_file_path_for_year(store_id)
+        mapping_path = file_manager.get_stock_mapping_path(store_id)
+        metadata_path = file_manager.get_stock_upload_metadata_path(store_id)
+    metadata = read_upload_metadata(metadata_path)
+    cleaned_rows = metadata.get("row_count_cleaned", "")
+    if cleaned_rows == "" and path.exists():
+        try:
+            cleaned_rows = len(read_csv_flexible(path))
+        except Exception:
+            cleaned_rows = ""
+    row = {
+        "Store": f"{store_id} | {store_name}",
+        "Standardized File Exists": path.exists(),
+        "Original File Name": metadata.get("original_file_name", ""),
+        "Uploaded At": metadata.get("uploaded_at", ""),
+        "Mapping Completed": mapping_path.exists() and bool(load_mapping(mapping_path)),
+        "Row Count Cleaned": cleaned_rows,
+        "Warnings Count": warning_count_from_metadata(metadata),
+        "Path": str(path),
+    }
+    if file_type == "sales":
+        row = {"FY": fy or "", **row}
+    return row
+
+
+def render_mapping_viewer(store_id: str, sales_years: list[str], section_prefix: str) -> None:
+    options = ["Stock"] + [f"Sales {fy}" for fy in sales_years]
+    if not options:
+        return
+    choice = st.selectbox("Mapping file", options, key=widget_key(section_prefix, "mapping_choice"))
+    if st.button("View Mapping", key=widget_key(section_prefix, "view_mapping")):
+        st.session_state[widget_key(section_prefix, "selected_mapping")] = choice
+    selected = st.session_state.get(widget_key(section_prefix, "selected_mapping"))
+    if not selected:
+        return
+    if selected == "Stock":
+        mapping_path = file_manager.get_stock_mapping_path(store_id)
+    else:
+        mapping_path = file_manager.get_sales_mapping_path(store_id, selected.replace("Sales ", "", 1))
+    mapping = load_mapping(mapping_path)
+    st.markdown(f"**Mapping: {selected}**")
+    if mapping:
+        st.dataframe(mapping_table(mapping), hide_index=True, use_container_width=True)
+    else:
+        st.warning("No mapping.json found for this file.")
 
 
 def refresh_report() -> None:
@@ -927,15 +1369,16 @@ def run_analysis(selected_paths: list[Path], show_mapping: bool = False) -> None
     sales_mappings = {}
     stock_mapping = {}
     if show_mapping:
-        for path in sales_paths:
-            fy = sales_year(path)
-            sales_mappings[fy] = mapping_editor(path, "sales", f"analysis_sales_{fy}")
-        stock_mapping = mapping_editor(stock_path, "stock", "analysis_stock") if stock_path else {}
-        for fy_key, mapping in sales_mappings.items():
-            qty_error = validate_sales_quantity_column(mapping.get("sales_qty"))
-            if qty_error:
-                st.error(f"{qty_error} FY: {fy_key}")
-                st.stop()
+        st.info("Column mapping is handled during upload. Analysis uses standardized cleaned files only.")
+    validation_rows = []
+    if stock_path:
+        validation_rows.extend(standardized_file_issues(stock_path, "stock"))
+    for path in sales_paths:
+        validation_rows.extend(standardized_file_issues(path, "sales"))
+    if any(str(row.get("Severity", "")).lower() == "error" for row in validation_rows):
+        st.warning("File is not standardized. Please re-upload and complete column mapping.")
+        st.dataframe(pd.DataFrame(validation_rows), hide_index=True, use_container_width=True)
+        st.stop()
     with st.spinner("Analyzing inventory, sales trends, and purchase requirements..."):
         report = build_report(store_id, store_name, stock_path, sales_paths, settings, sales_mappings, stock_mapping)
         st.session_state["report"] = report
@@ -1182,19 +1625,53 @@ def render_business_recommendations_page(report: dict | None) -> None:
 def render_sales_upload_page() -> None:
     st.title("Upload Item-wise Sales")
     store_caption()
-    store_id = active_store_id()
+    store_id, store_name = ensure_active_store()
     fy = st.selectbox("Financial Year", FINANCIAL_YEARS, index=4, key=widget_key("sales_upload", "financial_year"))
     target = file_manager.get_sales_file_path_for_year(store_id, fy)
     if target.exists():
         st.warning(f"Existing file for {active_store_name()} / {fy} will be replaced.")
-    upload = st.file_uploader("Item-wise sales CSV", type=["csv"], key=widget_key("sales_upload", "file"))
-    if st.button("Save / Replace Sales File", type="primary", key=widget_key("sales_upload", "save")):
-        if upload is None:
-            st.error("Choose a sales CSV before saving.")
-        else:
-            saved = file_manager.save_sales_file(store_id, upload, fy)
-            st.success(f"Saved to {saved}")
-            st.rerun()
+    upload = st.file_uploader("Item-wise sales file", type=["csv", "xlsx", "xls"], key=widget_key("sales_upload", "file"))
+    if upload is not None:
+        section_prefix = f"sales_upload_{store_id}_{fy}"
+        df, sheet_name, read_warnings = read_uploaded_table(upload, section_prefix)
+        for warning in read_warnings:
+            st.warning(warning)
+        if df is not None and not df.empty:
+            existing_mapping = load_mapping(file_manager.get_sales_mapping_path(store_id, fy))
+            template_mapping = render_mapping_template_loader("sales", df, widget_key(section_prefix, "template_loader"))
+            mapping = render_column_mapping_step(
+                df,
+                "sales",
+                existing_mapping=template_mapping or existing_mapping,
+                section_prefix=widget_key(section_prefix, "mapping"),
+            )
+            issues = validate_mapping(df, mapping, "sales")
+            render_mapping_template_actions("sales", mapping, widget_key(section_prefix, "template_actions"))
+            if not has_blocking_errors(issues):
+                preview = apply_mapping(
+                    df,
+                    mapping,
+                    "sales",
+                    {
+                        "store_id": store_id,
+                        "store_name": store_name,
+                        "fy": fy,
+                        "source_file_name": upload.name,
+                    },
+                )
+                st.subheader("Cleaned Preview With Store Context")
+                st.dataframe(preview.head(20), hide_index=True, use_container_width=True)
+            if st.button(
+                "Save / Replace Sales File",
+                type="primary",
+                disabled=has_blocking_errors(issues),
+                key=widget_key(section_prefix, "save"),
+            ):
+                saved = save_standardized_upload("sales", df, mapping, upload, sheet_name, fy, issues)
+                st.success(f"Saved standardized sales file to {saved}")
+                st.rerun()
+        elif df is not None:
+            st.warning("No rows found in the uploaded sales file.")
     st.subheader("Available FY Files")
     rows = [
         {
@@ -1255,19 +1732,53 @@ def render_sales_view_page() -> None:
 def render_stock_upload_page() -> None:
     st.title("Upload Stock")
     store_caption()
-    store_id = active_store_id()
+    store_id, store_name = ensure_active_store()
     path = file_manager.get_stock_file_path(store_id)
     if path:
         st.warning(f"Existing stock.csv for {active_store_name()} will be replaced.")
         st.caption(f"Current file last modified: {modified_text(path)}")
-    upload = st.file_uploader("Stock CSV", type=["csv"], key=widget_key("stock_upload", "file"))
-    if st.button("Save / Replace Stock File", type="primary", key=widget_key("stock_upload", "save")):
-        if upload is None:
-            st.error("Choose a stock CSV before saving.")
-        else:
-            saved = file_manager.save_stock_file(store_id, upload)
-            st.success(f"Saved to {saved}")
-            st.rerun()
+    upload = st.file_uploader("Stock file", type=["csv", "xlsx", "xls"], key=widget_key("stock_upload", "file"))
+    if upload is not None:
+        section_prefix = f"stock_upload_{store_id}"
+        df, sheet_name, read_warnings = read_uploaded_table(upload, section_prefix)
+        for warning in read_warnings:
+            st.warning(warning)
+        if df is not None and not df.empty:
+            existing_mapping = load_mapping(file_manager.get_stock_mapping_path(store_id))
+            template_mapping = render_mapping_template_loader("stock", df, widget_key(section_prefix, "template_loader"))
+            mapping = render_column_mapping_step(
+                df,
+                "stock",
+                existing_mapping=template_mapping or existing_mapping,
+                section_prefix=widget_key(section_prefix, "mapping"),
+            )
+            issues = validate_mapping(df, mapping, "stock")
+            render_mapping_template_actions("stock", mapping, widget_key(section_prefix, "template_actions"))
+            if not has_blocking_errors(issues):
+                preview = apply_mapping(
+                    df,
+                    mapping,
+                    "stock",
+                    {
+                        "store_id": store_id,
+                        "store_name": store_name,
+                        "source_file_name": upload.name,
+                        "category_lookup": category_lookup_for_store(store_id),
+                    },
+                )
+                st.subheader("Cleaned Preview With Store Context")
+                st.dataframe(preview.head(20), hide_index=True, use_container_width=True)
+            if st.button(
+                "Save / Replace Stock File",
+                type="primary",
+                disabled=has_blocking_errors(issues),
+                key=widget_key(section_prefix, "save"),
+            ):
+                saved = save_standardized_upload("stock", df, mapping, upload, sheet_name, None, issues)
+                st.success(f"Saved standardized stock file to {saved}")
+                st.rerun()
+        elif df is not None:
+            st.warning("No rows found in the uploaded stock file.")
 
 
 def render_stock_view_page(report: dict | None) -> None:
@@ -1484,22 +1995,34 @@ def render_purchase_run_analysis_page() -> None:
         st.info("Saved sales years: " + ", ".join(sales_years_from_paths(paths)))
     else:
         st.warning("No item-wise sales files found for the selected store. Upload at least one FY sales file.")
-    st.subheader("Column Mapping")
+    st.subheader("Pre-run Standardized File Validation")
+    validation_rows = []
+    if stock:
+        for issue in standardized_file_issues(stock, "stock"):
+            validation_rows.append({"File Type": "Stock", "FY": "", "Path": str(stock), **issue})
+    if paths:
+        for path in paths:
+            fy = sales_year(path)
+            for issue in standardized_file_issues(path, "sales"):
+                validation_rows.append({"File Type": "Sales", "FY": fy, "Path": str(path), **issue})
+    validation_errors = [row for row in validation_rows if str(row.get("Severity", "")).lower() == "error"]
+    if validation_rows:
+        st.warning("File is not standardized. Please re-upload and complete column mapping.")
+        st.dataframe(pd.DataFrame(validation_rows), hide_index=True, use_container_width=True)
+    elif stock and paths:
+        st.success("Standardized stock and sales files are ready for analysis.")
     if stock and paths:
         stock_path = stock
         sales_paths = paths
         settings = current_settings()
         sales_mappings = {}
-        for path in sales_paths:
-            fy = sales_year(path)
-            sales_mappings[fy] = mapping_editor(path, "sales", f"analysis_sales_{fy}")
-        stock_mapping = mapping_editor(stock_path, "stock", "analysis_stock")
-        for fy_key, mapping in sales_mappings.items():
-            qty_error = validate_sales_quantity_column(mapping.get("sales_qty"))
-            if qty_error:
-                st.error(f"{qty_error} FY: {fy_key}")
-                st.stop()
-        if st.button("Run Analysis", type="primary", key=widget_key("purchase_run", "run_analysis")):
+        stock_mapping = {}
+        if st.button(
+            "Run Analysis",
+            type="primary",
+            disabled=bool(validation_errors),
+            key=widget_key("purchase_run", "run_analysis"),
+        ):
             with st.spinner("Analyzing inventory, sales trends, and purchase requirements..."):
                 report = build_report(store_id, store_name, stock_path, sales_paths, settings, sales_mappings, stock_mapping)
                 st.session_state["report"] = report
@@ -1846,14 +2369,11 @@ def render_analysis_settings_page() -> None:
 def render_data_file_status_page() -> None:
     st.title("Data File Status")
     store_caption()
-    store_id = active_store_id()
+    store_id, store_name = ensure_active_store()
     stock = file_manager.get_stock_file_path(store_id)
-    sales_rows = []
-    for fy in file_manager.list_available_sales_years(store_id):
-        path = file_manager.get_sales_file_path_for_year(store_id, fy)
-        sales_rows.append({"Store ID": store_id, "Store Name": active_store_name(), "FY": fy, "Available": path.exists(), "Last Modified": modified_text(path), "Path": str(path)})
-    stock_path = stock or (file_manager.get_store_stock_dir(store_id) / file_manager.STOCK_FILENAME)
-    stock_rows = [{"Store ID": store_id, "Store Name": active_store_name(), "Available": bool(stock), "Last Modified": modified_text(stock), "Path": str(stock_path)}]
+    sales_years = file_manager.list_available_sales_years(store_id)
+    sales_rows = [upload_status_row("sales", store_id, store_name, fy) for fy in sales_years]
+    stock_rows = [upload_status_row("stock", store_id, store_name)]
     master_rows = []
     for name, path in {
         "discontinued-items.csv": mdm.discontinued_path(store_id),
@@ -1868,6 +2388,8 @@ def render_data_file_status_page() -> None:
     st.dataframe(pd.DataFrame(stock_rows), hide_index=True, use_container_width=True)
     st.subheader("Sales Files")
     st.dataframe(pd.DataFrame(sales_rows), hide_index=True, use_container_width=True)
+    st.subheader("View Mapping")
+    render_mapping_viewer(store_id, sales_years, "data_file_status")
     st.subheader("Master Files")
     st.dataframe(pd.DataFrame(master_rows), hide_index=True, use_container_width=True)
 
@@ -1965,29 +2487,17 @@ def render_add_store_page() -> None:
 def render_store_data_status_page() -> None:
     st.title("Store Data Status")
     store_caption()
-    store_id = active_store_id()
+    store_id, store_name = ensure_active_store()
     status = file_manager.get_store_data_status(store_id)
     st.subheader("Stock")
-    stock_rows = [
-        {
-            "Available": Path(row["Path"]).exists(),
-            "Last Modified": modified_text(Path(row["Path"])),
-            "Path": str(row["Path"]),
-        }
-        for row in status["stock_files"]
-    ]
+    stock_rows = [upload_status_row("stock", store_id, store_name)]
     st.dataframe(pd.DataFrame(stock_rows or [{"Available": False, "Last Modified": "Not available", "Path": str(status["stock_path"])}]), hide_index=True, use_container_width=True)
     st.subheader("Sales Files")
-    sales_rows = [
-        {
-            "FY": row["FY"],
-            "Available": Path(row["Path"]).exists(),
-            "Last Modified": modified_text(Path(row["Path"])),
-            "Path": str(row["Path"]),
-        }
-        for row in status["sales_files"]
-    ]
+    sales_years = status["sales_years"]
+    sales_rows = [upload_status_row("sales", store_id, store_name, fy) for fy in sales_years]
     st.dataframe(pd.DataFrame(sales_rows), hide_index=True, use_container_width=True)
+    st.subheader("View Mapping")
+    render_mapping_viewer(store_id, sales_years, "store_data_status")
     st.subheader("Latest Result")
     st.dataframe(
         pd.DataFrame(

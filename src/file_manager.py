@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
+from datetime import datetime
 from pathlib import Path
 
 from . import store_manager
@@ -13,6 +15,10 @@ LEGACY_COMPACT_SALES_DIR = DATA_DIR / "itemwisesales"
 LEGACY_COMPACT_SALES_FILENAME = "itemwisesales.csv"
 STOCK_FILENAME = "stock.csv"
 MIGRATION_NOTE = DATA_DIR / "stores" / ".single_store_migration.json"
+MAPPING_FILENAME = "mapping.json"
+UPLOAD_METADATA_FILENAME = "upload_metadata.json"
+ORIGINAL_UPLOAD_DIRNAME = "original"
+MAPPING_TEMPLATES_DIR = DATA_DIR / "master" / "mapping-templates"
 
 
 def ensure_data_dirs() -> None:
@@ -22,6 +28,8 @@ def ensure_data_dirs() -> None:
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
     EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
     STORES_DIR.mkdir(parents=True, exist_ok=True)
+    (MAPPING_TEMPLATES_DIR / "sales").mkdir(parents=True, exist_ok=True)
+    (MAPPING_TEMPLATES_DIR / "stock").mkdir(parents=True, exist_ok=True)
 
 
 def get_store_dir(store_id: str) -> Path:
@@ -48,6 +56,18 @@ def get_sales_file_path_for_year(store_id: str, fy: str) -> Path:
     return get_sales_store_dir(store_id, fy) / SALES_FILENAME
 
 
+def get_sales_mapping_path(store_id: str, fy: str) -> Path:
+    return get_sales_store_dir(store_id, fy) / MAPPING_FILENAME
+
+
+def get_sales_upload_metadata_path(store_id: str, fy: str) -> Path:
+    return get_sales_store_dir(store_id, fy) / UPLOAD_METADATA_FILENAME
+
+
+def get_sales_original_dir(store_id: str, fy: str) -> Path:
+    return get_sales_store_dir(store_id, fy) / ORIGINAL_UPLOAD_DIRNAME
+
+
 def get_sales_year_from_path(path: Path) -> str:
     path = Path(path)
     if path.parent.parent.parent.name in {SALES_DIR.name, LEGACY_COMPACT_SALES_DIR.name}:
@@ -57,6 +77,23 @@ def get_sales_year_from_path(path: Path) -> str:
 
 def get_stock_file_path_for_year(store_id: str, fy: str | None = None) -> Path:
     return get_store_stock_dir(store_id) / STOCK_FILENAME
+
+
+def get_stock_mapping_path(store_id: str, fy: str | None = None) -> Path:
+    return get_store_stock_dir(store_id) / MAPPING_FILENAME
+
+
+def get_stock_upload_metadata_path(store_id: str, fy: str | None = None) -> Path:
+    return get_store_stock_dir(store_id) / UPLOAD_METADATA_FILENAME
+
+
+def get_stock_original_dir(store_id: str, fy: str | None = None) -> Path:
+    return get_store_stock_dir(store_id) / ORIGINAL_UPLOAD_DIRNAME
+
+
+def get_mapping_template_dir(file_type: str) -> Path:
+    folder = "sales" if str(file_type).strip().lower() in {"sales", "item-wise sales", "item-wise-sales"} else "stock"
+    return MAPPING_TEMPLATES_DIR / folder
 
 
 def get_store_master_dir(store_id: str) -> Path:
@@ -87,6 +124,19 @@ def _save_uploaded(uploaded_file, destination: Path) -> Path:
         uploaded_file.seek(0)
         shutil.copyfileobj(uploaded_file, output)
     return destination
+
+
+def _safe_filename(filename: str) -> str:
+    name = Path(str(filename or "uploaded_file")).name
+    name = re.sub(r"[^A-Za-z0-9._ -]+", "_", name).strip(" .")
+    return name or "uploaded_file"
+
+
+def save_original_upload(uploaded_file, destination_dir: Path, timestamp: str | None = None) -> Path:
+    timestamp = timestamp or datetime.now().strftime("%Y%m%d_%H%M%S")
+    safe_name = _safe_filename(getattr(uploaded_file, "name", "uploaded_file"))
+    destination = destination_dir / f"{timestamp}_{safe_name}"
+    return _save_uploaded(uploaded_file, destination)
 
 
 def save_sales_file(store_id: str, uploaded_file, fy: str) -> Path:
