@@ -2098,8 +2098,53 @@ def inject_ui_css() -> None:
     st.markdown(
         """
         <style>
+        .stApp,
+        [data-testid="stAppViewContainer"],
+        [data-testid="stAppViewContainer"] > .main,
+        [data-testid="stHeader"],
+        [data-testid="stToolbar"],
+        [data-testid="stDecoration"],
+        .main .block-container {
+            background: #ffffff !important;
+            color: #0f172a !important;
+        }
+        [data-testid="stHeader"] {
+            border-bottom: 1px solid #e5e7eb;
+        }
+        h1, h2, h3, h4, h5, h6, p, label, span, div {
+            color: inherit;
+        }
+        div[data-testid="stMetric"],
+        div[data-testid="stDataFrame"],
+        div[data-testid="stExpander"],
+        div[data-testid="stForm"],
+        div[data-testid="stAlert"] {
+            background: #ffffff !important;
+            color: #0f172a !important;
+        }
+        div[data-baseweb="select"] > div,
+        div[data-baseweb="input"] input,
+        textarea,
+        input {
+            background: #ffffff !important;
+            color: #0f172a !important;
+            border-color: #d1d5db !important;
+        }
+        button {
+            background: #ffffff;
+            color: #0f172a;
+        }
+        div[data-testid="stButton"] > button[kind="primary"] {
+            background: #2563eb !important;
+            border-color: #2563eb !important;
+            color: #ffffff !important;
+        }
+        div[data-testid="stButton"] > button[kind="primary"] p {
+            color: #ffffff !important;
+        }
         section[data-testid="stSidebar"] {
-            background: #f8fafc;
+            background: #f8fafc !important;
+            color: #0f172a !important;
             border-right: 1px solid #e2e8f0;
         }
         section[data-testid="stSidebar"] hr {
