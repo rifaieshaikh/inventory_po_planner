@@ -36,11 +36,11 @@ CSV inputs
 `app.py` is the application entry point. At import/startup it:
 
 - Sets Streamlit page config.
-- Ensures `data/`, `data/master/`, `data/itemwisesales/`, `data/stock/`, and `data/stores/` exist.
+- Ensures `data/`, `data/master/`, `data/item-wise-sales/`, `data/stock/`, `data/runs/`, and `data/stores/` exist.
 - Ensures `data/master/stores.csv` exists and creates `STORE-0001 / Main Store` when no store exists.
 - Copies old single-store sales and stock files into the default FY/store input folders on first run.
 - Ensures global supplier/category CSVs exist under `data/master/`.
-- Ensures store-specific master files and result directories exist under `data/stores/{STORE_ID}/`.
+- Ensures store-specific master files under `data/stores/{STORE_ID}/` and run directories under `data/runs/{STORE_ID}/`.
 - Loads the selected store's latest saved result into session state if available.
 - Builds the sidebar navigation and renders the selected page.
 
@@ -104,16 +104,18 @@ Global master files under `data/master/` define stores, suppliers, and categorie
 Every analysis run gets a generated ID like `RUN-20260629-085058`. The run is saved under:
 
 ```text
-data/stores/{STORE_ID}/results/history/{RUN_ID}/
+data/runs/{STORE_ID}/{RUN_ID}/
 ```
 
-The same files are copied to:
+Each run keeps its input snapshots and output files:
 
 ```text
-data/stores/{STORE_ID}/results/latest/
+data/runs/{STORE_ID}/{RUN_ID}/item-wise-sales/{FY}/item-wise-sales.csv
+data/runs/{STORE_ID}/{RUN_ID}/stock/stock.csv
+data/runs/{STORE_ID}/{RUN_ID}/result/
 ```
 
-The app can load the selected store's `latest` result automatically and can load or delete historical runs for that store from the Result History pages.
+The app can load the selected store's latest result automatically from `data/runs/{STORE_ID}/latest/result/` and can load or delete historical runs for that store from the Result History pages.
 
 ## Current Data Snapshot
 

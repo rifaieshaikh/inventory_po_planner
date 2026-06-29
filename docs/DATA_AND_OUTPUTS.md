@@ -17,18 +17,25 @@ data/
         discontinued-items.csv
         item-suppliers.csv
         item-categories.csv
-      results/
-        latest/
-        history/
-          RUN-YYYYMMDD-HHMMSS/
-  itemwisesales/
+  item-wise-sales/
     {FY}/
       {STORE_ID}/
-        itemwisesales.csv
+        item-wise-sales.csv
   stock/
-    {FY}/
-      {STORE_ID}/
-        stock.csv
+    {STORE_ID}/
+      stock.csv
+  runs/
+    {STORE_ID}/
+      {RUN_ID}/
+        item-wise-sales/
+          {FY}/
+            item-wise-sales.csv
+        stock/
+          stock.csv
+        result/
+          manifest.json
+          *.csv
+          inventory_report.xlsx
 ```
 
 ## Input Files
@@ -38,7 +45,7 @@ data/
 Expected path:
 
 ```text
-data/stock/{FY}/{STORE_ID}/stock.csv
+data/stock/{STORE_ID}/stock.csv
 ```
 
 Required logical fields:
@@ -65,7 +72,7 @@ SlNo,Item Name,P.Price,Retail,COST,Qty,Amount
 Expected path:
 
 ```text
-data/itemwisesales/{FY}/{STORE_ID}/itemwisesales.csv
+data/item-wise-sales/{FY}/{STORE_ID}/item-wise-sales.csv
 ```
 
 Required logical fields:
@@ -241,13 +248,20 @@ Rows marked `Discontinued = Yes` force PO quantity and purchase value to zero.
 Each saved run writes CSV and text files to:
 
 ```text
-data/stores/{STORE_ID}/results/history/{RUN_ID}/
+data/runs/{STORE_ID}/{RUN_ID}/result/
 ```
 
-The latest run is copied to:
+The run also snapshots the input files used for that analysis:
 
 ```text
-data/stores/{STORE_ID}/results/latest/
+data/runs/{STORE_ID}/{RUN_ID}/item-wise-sales/{FY}/item-wise-sales.csv
+data/runs/{STORE_ID}/{RUN_ID}/stock/stock.csv
+```
+
+The latest run's result files are also copied to:
+
+```text
+data/runs/{STORE_ID}/latest/result/
 ```
 
 ### CSV Outputs

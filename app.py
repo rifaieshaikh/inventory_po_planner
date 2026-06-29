@@ -1256,17 +1256,16 @@ def render_stock_upload_page() -> None:
     st.title("Upload Stock")
     store_caption()
     store_id = active_store_id()
-    fy = st.selectbox("Financial Year", FINANCIAL_YEARS, index=4, key=widget_key("stock_upload", "financial_year"))
-    path = file_manager.get_stock_file_path(store_id, fy)
+    path = file_manager.get_stock_file_path(store_id)
     if path:
-        st.warning(f"Existing stock.csv for {active_store_name()} / {fy} will be replaced.")
+        st.warning(f"Existing stock.csv for {active_store_name()} will be replaced.")
         st.caption(f"Current file last modified: {modified_text(path)}")
     upload = st.file_uploader("Stock CSV", type=["csv"], key=widget_key("stock_upload", "file"))
     if st.button("Save / Replace Stock File", type="primary", key=widget_key("stock_upload", "save")):
         if upload is None:
             st.error("Choose a stock CSV before saving.")
         else:
-            saved = file_manager.save_stock_file(store_id, upload, fy)
+            saved = file_manager.save_stock_file(store_id, upload)
             st.success(f"Saved to {saved}")
             st.rerun()
 
@@ -1278,12 +1277,7 @@ def render_stock_view_page(report: dict | None) -> None:
     if report is not None:
         detail = report["Detailed Item Analysis"].copy()
     else:
-        stock_years = file_manager.list_available_stock_years(store_id)
-        if not stock_years:
-            st.warning("Stock file is missing for the selected store.")
-            return
-        selected_stock_fy = st.selectbox("Stock FY", stock_years, index=len(stock_years) - 1, key=widget_key("stock_view", "stock_fy"))
-        path = file_manager.get_stock_file_path(store_id, selected_stock_fy)
+        path = file_manager.get_stock_file_path(store_id)
         if not path:
             st.warning("Stock file is missing for the selected store.")
             return
@@ -1475,12 +1469,7 @@ def render_purchase_run_analysis_page() -> None:
     store_id, store_name = ensure_active_store()
     store_caption()
     years = file_manager.list_available_sales_years(store_id)
-    stock_years = file_manager.list_available_stock_years(store_id)
-    default_stock_fy = st.session_state.get(widget_key("purchase_run", "stock_fy"), stock_years[-1] if stock_years else file_manager.DEFAULT_STOCK_FY)
-    stock_fy_options = stock_years or FINANCIAL_YEARS
-    stock_fy_index = stock_fy_options.index(default_stock_fy) if default_stock_fy in stock_fy_options else len(stock_fy_options) - 1
-    selected_stock_fy = st.selectbox("Stock FY", stock_fy_options, index=stock_fy_index, key=widget_key("purchase_run", "stock_fy"))
-    stock = file_manager.get_stock_file_path(store_id, selected_stock_fy)
+    stock = file_manager.get_stock_file_path(store_id)
     selected = st.multiselect("Include FYs", years, default=st.session_state.get(widget_key("sidebar", "selected_years"), years), key=widget_key("sidebar", "selected_years"))
     paths = file_manager.get_sales_file_paths(store_id, selected)
     c1, c2, c3 = st.columns(3)
@@ -1490,7 +1479,7 @@ def render_purchase_run_analysis_page() -> None:
     if stock:
         st.info(f"Stock file available. Last modified: {modified_text(stock)}")
     else:
-        st.warning(f"Stock file is missing for {active_store_name()} / {selected_stock_fy}. Upload stock.csv.")
+        st.warning(f"Stock file is missing for {active_store_name()}. Upload stock.csv.")
     if paths:
         st.info("Saved sales years: " + ", ".join(sales_years_from_paths(paths)))
     else:
@@ -1713,7 +1702,7 @@ def render_supplier_ready_po_page(report: dict | None) -> None:
     if st.button("Save Edited Supplier PO for this run", key=widget_key("supplier_ready_po", "save_edited", active_run_id)):
         save_targets = [result_dir / "supplier_ready_po_edited.csv"]
         latest_target = result_store.latest_dir(store_id) / "supplier_ready_po_edited.csv"
-        history_target = result_store.history_dir(store_id) / active_run_id / "supplier_ready_po_edited.csv"
+        history_target = result_store.run_result_dir(store_id, active_run_id) / "supplier_ready_po_edited.csv"
         for target in [latest_target, history_target]:
             if target not in save_targets:
                 save_targets.append(target)
@@ -1863,10 +1852,8 @@ def render_data_file_status_page() -> None:
     for fy in file_manager.list_available_sales_years(store_id):
         path = file_manager.get_sales_file_path_for_year(store_id, fy)
         sales_rows.append({"Store ID": store_id, "Store Name": active_store_name(), "FY": fy, "Available": path.exists(), "Last Modified": modified_text(path), "Path": str(path)})
-    stock_rows = []
-    for fy in file_manager.list_available_stock_years(store_id):
-        path = file_manager.get_stock_file_path_for_year(store_id, fy)
-        stock_rows.append({"Store ID": store_id, "Store Name": active_store_name(), "FY": fy, "Available": path.exists(), "Last Modified": modified_text(path), "Path": str(path)})
+    stock_path = stock or file_manager.get_stock_file_path_for_year(store_id)
+    stock_rows = [{"Store ID": store_id, "Store Name": active_store_name(), "Available": bool(stock), "Last Modified": modified_text(stock), "Path": str(stock_path)}]
     master_rows = []
     for name, path in {
         "discontinued-items.csv": mdm.discontinued_path(store_id),
@@ -1878,7 +1865,7 @@ def render_data_file_status_page() -> None:
     }.items():
         master_rows.append({"File": name, "Available": path.exists(), "Last Modified": modified_text(path), "Path": str(path)})
     st.subheader("Stock")
-    st.dataframe(pd.DataFrame(stock_rows or [{"Store ID": store_id, "Store Name": active_store_name(), "FY": "", "Available": bool(stock), "Last Modified": modified_text(stock), "Path": str(stock) if stock else str(file_manager.get_stock_file_path_for_year(store_id, file_manager.DEFAULT_STOCK_FY))}]), hide_index=True, use_container_width=True)
+    st.dataframe(pd.DataFrame(stock_rows), hide_index=True, use_container_width=True)
     st.subheader("Sales Files")
     st.dataframe(pd.DataFrame(sales_rows), hide_index=True, use_container_width=True)
     st.subheader("Master Files")
@@ -1983,14 +1970,13 @@ def render_store_data_status_page() -> None:
     st.subheader("Stock")
     stock_rows = [
         {
-            "FY": row["FY"],
             "Available": Path(row["Path"]).exists(),
             "Last Modified": modified_text(Path(row["Path"])),
             "Path": str(row["Path"]),
         }
         for row in status["stock_files"]
     ]
-    st.dataframe(pd.DataFrame(stock_rows or [{"FY": "", "Available": False, "Last Modified": "Not available", "Path": str(status["stock_path"])}]), hide_index=True, use_container_width=True)
+    st.dataframe(pd.DataFrame(stock_rows or [{"Available": False, "Last Modified": "Not available", "Path": str(status["stock_path"])}]), hide_index=True, use_container_width=True)
     st.subheader("Sales Files")
     sales_rows = [
         {

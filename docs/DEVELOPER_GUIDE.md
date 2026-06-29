@@ -139,7 +139,7 @@ When editing master-data behavior, preserve user changes and avoid destructive r
 
 ## Result Storage Rules
 
-`save_analysis_result(store_id, ...)` writes a new run directory under `data/stores/{STORE_ID}/results/history/` and then copies that directory to that store's `results/latest/`.
+`save_analysis_result(store_id, ...)` writes each run under `data/runs/{STORE_ID}/{RUN_ID}/`. The run root contains the stock snapshot, the included item-wise sales files by FY, and a `result/` directory with generated CSV, text, manifest, and Excel files. The generated result files are also copied to `data/runs/{STORE_ID}/latest/result/`.
 
 Historical run IDs are validated before load/delete/copy:
 
@@ -182,13 +182,13 @@ The script prints:
 Saved run folders are under:
 
 ```text
-data/stores/{STORE_ID}/results/history/
+data/runs/{STORE_ID}/{RUN_ID}/
 ```
 
-Each run has a `manifest.json`. The current active latest run is copied to:
+Each run has a `result/manifest.json`. The current active latest result is copied to:
 
 ```text
-data/stores/{STORE_ID}/results/latest/
+data/runs/{STORE_ID}/latest/result/
 ```
 
 ## Known Caveats
@@ -207,6 +207,6 @@ Before handing off changes:
 1. Run `python -m compileall app.py src scripts`.
 2. If analysis logic changed, run the Streamlit app and create a new analysis result from the UI.
 3. Inspect Data Validation and Velocity Calculation Warnings.
-4. Check `data/stores/{STORE_ID}/results/latest/manifest.json`.
+4. Check `data/runs/{STORE_ID}/latest/result/manifest.json`.
 5. Download or regenerate the Excel workbook from Reports / Excel Export.
 6. Update documentation when behavior or file contracts change.

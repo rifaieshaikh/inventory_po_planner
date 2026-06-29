@@ -31,7 +31,7 @@ Use the sidebar store selector to choose the active store. Store-specific pages 
 Use the Stock / Upload Stock page to upload one stock CSV. The app always saves it as:
 
 ```text
-data/stock/{FY}/{STORE_ID}/stock.csv
+data/stock/{STORE_ID}/stock.csv
 ```
 
 Uploading a new stock file replaces the existing file for the selected store only.
@@ -41,13 +41,13 @@ Uploading a new stock file replaces the existing file for the selected store onl
 Use Item-wise Sales / Upload Sales to upload one CSV per financial year. The app saves each file as:
 
 ```text
-data/itemwisesales/{FY}/{STORE_ID}/itemwisesales.csv
+data/item-wise-sales/{FY}/{STORE_ID}/item-wise-sales.csv
 ```
 
 Example:
 
 ```text
-data/itemwisesales/26-27/STORE-0001/itemwisesales.csv
+data/item-wise-sales/26-27/STORE-0001/item-wise-sales.csv
 ```
 
 Uploading a new file for the same store and FY replaces that store/FY's previous file.
@@ -113,7 +113,7 @@ View Sales lets you inspect cleaned sales rows, filter by FY, month, item text, 
 
 ### Stock
 
-View Stock shows current stock enriched with category, supplier, discontinued, velocity, risk, and PO fields when a report exists. Upload Stock replaces `data/stock/{FY}/{STORE_ID}/stock.csv` for the selected store and FY. Bulk Item Update routes to the discontinued bulk workflow.
+View Stock shows current stock enriched with category, supplier, discontinued, velocity, risk, and PO fields when a report exists. Upload Stock replaces `data/stock/{STORE_ID}/stock.csv` for the selected store. Bulk Item Update routes to the discontinued bulk workflow.
 
 ### Categories
 
@@ -133,7 +133,7 @@ Use Bulk Mark Discontinued to mark selected items as discontinued or remove disc
 
 ### Result History
 
-Use this section to inspect past runs, load an old run as the active result, or delete saved runs. The app also supports keeping the latest result while deleting older historical runs.
+Use this section to inspect past runs, load an old run as the active result, or delete saved runs. Each run keeps its input stock file, included FY sales files, and generated outputs under `data/runs/{STORE_ID}/{RUN_ID}/`.
 
 ### Reports
 
