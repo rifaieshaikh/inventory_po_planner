@@ -1,9 +1,0 @@
-Recommendation Area	Recommendation
-Order immediately	These items have high sales velocity and less than 15 days of stock cover: None.
-Do not order	These items have no recent sales and current stock may already be blocked: 10398 HG(0.5X22MM), 1126 MT 0.5 X22, 1261MT 2MMX22MM, 1264 MT 0.5 X 22, 19992 MT 0.5 X 22, POLYFIX DE-BONDER 100ML, POLYFIX WPC GRADE 50GM, POLYFIX-FLX 20GM, POLYFIX-FLX 50GM, Total
-Monitor	These items are showing recent upward movement, but history may still be limited: 10397 HG(0.5X22 MM), 10659 (0.45X40MM), 1126 HG(0.5X40), 1131 0.5X40MM, 1135 HG 0.5X40MM, 1135 HG 0.8 X 22 MM, 1140 HG (BAGE), 11510 (0.45X40MM), 1261 HG (0.5 X 40 MM), 1267 HG(0.5X22MM)
-Reduce purchase	These items are declining, so recent velocity is used instead of old average: VAY BAND 10485 40MM, VAY BAND 1113MT (0.8MM), VAY BAND 1114MT 2MMX22MM, VAY BAND 1127 HG (.5), VAY BAND 1128 HG(.5), VAY BAND 1133MT0.5X22MM, VAY BAND 1261HG (DARK GREY), VAY BAND 1313 HG CLUD GREY, VAY BAND 1401GL BLACK GLOSSY, VAY BAND 1735 (.45X22MM)
-Box rounding warning	MOQ creates extra stock. Purchase only if supplier does not allow smaller quantity: None.
-Cash optimization	PO is reduced by avoiding slow-moving items that would otherwise receive unnecessary 3-month stock: 10397 HG(0.5X22 MM), 10398 HG(0.5X22MM), 1126 HG(0.5X40), 1131 0.5X40MM, 1135 HG 0.5X40MM, 1135 HG 0.8 X 22 MM, 1140 HG (BAGE), 11510 (0.45X40MM), 1261 HG (0.5 X 40 MM), 1261MT 2MMX22MM
-Budget control	These PO lines are deferred due to the purchase budget: VAY BAND 11510, VAY BAND 11510(0.5X22)
-PO value health	Optimized PO value is 104,723.15; amount is used for budget control only, while planning remains quantity-based.

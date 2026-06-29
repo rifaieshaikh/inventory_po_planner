@@ -10,8 +10,10 @@ import pandas as pd
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = PROJECT_ROOT / "data"
+STORES_DIR = DATA_DIR / "stores"
 SALES_DIR = DATA_DIR / "item-wise-sales"
 STOCK_DIR = DATA_DIR / "stock"
+RUNS_DIR = DATA_DIR / "runs"
 EXPORTS_DIR = DATA_DIR / "exports"
 MASTER_DIR = DATA_DIR / "master"
 REPORT_PATH = EXPORTS_DIR / "inventory_report.xlsx"

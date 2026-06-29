@@ -6,23 +6,36 @@ This document describes the file contracts used by Inventory PO Planner.
 
 ```text
 data/
-  stock/
-    stock.csv
+  master/
+    stores.csv
+    suppliers.csv
+    categories.csv
+  stores/
+    STORE-0001/
+      store.json
+      master/
+        discontinued-items.csv
+        item-suppliers.csv
+        item-categories.csv
   item-wise-sales/
     {FY}/
-      item-wise-sales.csv
-  master/
-    suppliers.csv
-    item-suppliers.csv
-    categories.csv
-    item-categories.csv
-    discontinued-items.csv
-  exports/
-    inventory_report.xlsx
-  results/
-    latest/
-    history/
-      RUN-YYYYMMDD-HHMMSS/
+      {STORE_ID}/
+        item-wise-sales.csv
+  stock/
+    {STORE_ID}/
+      stock.csv
+  runs/
+    {STORE_ID}/
+      {RUN_ID}/
+        item-wise-sales/
+          {FY}/
+            item-wise-sales.csv
+        stock/
+          stock.csv
+        result/
+          manifest.json
+          *.csv
+          inventory_report.xlsx
 ```
 
 ## Input Files
@@ -32,7 +45,7 @@ data/
 Expected path:
 
 ```text
-data/stock/stock.csv
+data/stock/{STORE_ID}/stock.csv
 ```
 
 Required logical fields:
@@ -59,7 +72,7 @@ SlNo,Item Name,P.Price,Retail,COST,Qty,Amount
 Expected path:
 
 ```text
-data/item-wise-sales/{FY}/item-wise-sales.csv
+data/item-wise-sales/{FY}/{STORE_ID}/item-wise-sales.csv
 ```
 
 Required logical fields:
@@ -144,7 +157,23 @@ When no usable sales date exists, missing months are assigned to March of the se
 
 ## Master Files
 
-Master files are created automatically if missing or empty.
+Master files are created automatically if missing or empty. Stores, suppliers, and categories are global. Item mappings and discontinued flags are store-specific.
+
+### stores.csv
+
+Path:
+
+```text
+data/master/stores.csv
+```
+
+Columns:
+
+```text
+Store ID,Store Name,Location,Contact Person,Phone,Notes,Active,Created At,Updated At
+```
+
+Store IDs are generated as `STORE-0001`, `STORE-0002`, and so on. If no stores exist, the app creates `STORE-0001 / Main Store`.
 
 ### suppliers.csv
 
@@ -157,6 +186,12 @@ Supplier ID,Supplier Name,Contact Person,Phone,Email,Address,Notes,Active,Create
 Supplier IDs are generated as `SUP-0001`, `SUP-0002`, and so on.
 
 ### item-suppliers.csv
+
+Path:
+
+```text
+data/stores/{STORE_ID}/master/item-suppliers.csv
+```
 
 Columns:
 
@@ -178,6 +213,12 @@ Category IDs are generated as `CAT-0001`, `CAT-0002`, and so on. The app ensures
 
 ### item-categories.csv
 
+Path:
+
+```text
+data/stores/{STORE_ID}/master/item-categories.csv
+```
+
 Columns:
 
 ```text
@@ -187,6 +228,12 @@ Item Key,Item Code / SKU,Item Name,Category ID,Category Name,Updated At
 These mappings override the category from source data.
 
 ### discontinued-items.csv
+
+Path:
+
+```text
+data/stores/{STORE_ID}/master/discontinued-items.csv
+```
 
 Columns:
 
@@ -201,19 +248,27 @@ Rows marked `Discontinued = Yes` force PO quantity and purchase value to zero.
 Each saved run writes CSV and text files to:
 
 ```text
-data/results/history/{RUN_ID}/
+data/runs/{STORE_ID}/{RUN_ID}/result/
 ```
 
-The latest run is copied to:
+The run also snapshots the input files used for that analysis:
 
 ```text
-data/results/latest/
+data/runs/{STORE_ID}/{RUN_ID}/item-wise-sales/{FY}/item-wise-sales.csv
+data/runs/{STORE_ID}/{RUN_ID}/stock/stock.csv
+```
+
+The latest run's result files are also copied to:
+
+```text
+data/runs/{STORE_ID}/latest/result/
 ```
 
 ### CSV Outputs
 
 | Report Key | File |
 | --- | --- |
+| Store Summary | `store_summary.csv` |
 | Executive Summary | `executive_summary.csv` |
 | Data Validation | `data_validation.csv` |
 | Velocity Calculation Warnings | `velocity_calculation_warnings.csv` |
@@ -245,6 +300,7 @@ These are stored as tab-separated text when they originate from dataframes.
 
 `detailed_item_analysis.csv` is the main per-item output. It includes:
 
+- Store ID and Store Name
 - Item identifiers and item key
 - Supplier assignment fields
 - Discontinued fields
@@ -269,6 +325,8 @@ The current checked-in latest result has 270 detailed rows.
 
 Important columns:
 
+- Store ID
+- Store Name
 - Supplier Name
 - Item Code / SKU
 - Item Name
@@ -296,7 +354,7 @@ The current checked-in latest result has 10 optimized PO rows.
 Columns:
 
 ```text
-Supplier Name,Sl No,Item Code / SKU,Item Name,Category Name,Category Box Qty,Quantity,Boxes,Unit,Purchase Price,Total Amount
+Store ID,Store Name,Supplier Name,Sl No,Item Code / SKU,Item Name,Category Name,Category Box Qty,Quantity,Boxes,Unit,Purchase Price,Total Amount
 ```
 
 The Streamlit UI lets users edit `Quantity`; boxes and total amount are recalculated from quantity, category box quantity, and purchase price.
@@ -323,6 +381,8 @@ Important fields:
 | Field | Meaning |
 | --- | --- |
 | run_id | Generated run ID |
+| store_id | Store used for the run |
+| store_name | Store name used for the run |
 | created_at | ISO timestamp |
 | created_at_display | Human readable timestamp |
 | stock_file | Stock file used |

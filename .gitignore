@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+
+streamlit*.log
+
+data/runs/
+data/stores/*/results/
+data/stores/*/item-wise-sales/
+data/stores/*/stock/
+data/stores/.single_store_migration.json

@@ -20,46 +20,51 @@ Use the URL printed by Streamlit.
 
 ## Prepare Input Files
 
-The app can work from files already saved in the `data/` folder, even if nothing is uploaded during the current session.
+The app can work from files already saved in the selected FY/store input folders, even if nothing is uploaded during the current session. A default `STORE-0001 / Main Store` is created automatically if no stores exist.
+
+### Store Selection
+
+Use the sidebar store selector to choose the active store. Store-specific pages only read and write files for the selected store. Use Stores / View Stores to edit, deactivate, reactivate, or switch stores, and Stores / Add Store to create another branch.
 
 ### Stock File
 
 Use the Stock / Upload Stock page to upload one stock CSV. The app always saves it as:
 
 ```text
-data/stock/stock.csv
+data/stock/{STORE_ID}/stock.csv
 ```
 
-Uploading a new stock file replaces the existing file.
+Uploading a new stock file replaces the existing file for the selected store only.
 
 ### Sales Files
 
 Use Item-wise Sales / Upload Sales to upload one CSV per financial year. The app saves each file as:
 
 ```text
-data/item-wise-sales/{FY}/item-wise-sales.csv
+data/item-wise-sales/{FY}/{STORE_ID}/item-wise-sales.csv
 ```
 
 Example:
 
 ```text
-data/item-wise-sales/26-27/item-wise-sales.csv
+data/item-wise-sales/26-27/STORE-0001/item-wise-sales.csv
 ```
 
-Uploading a new file for the same FY replaces that FY's previous file.
+Uploading a new file for the same store and FY replaces that store/FY's previous file.
 
 ## First Analysis Run
 
-1. Open Settings / Data File Status and confirm stock and sales files exist.
-2. Open Categories / View Categories and check category box quantities.
-3. Open Suppliers / View Suppliers and add or edit supplier records if needed.
-4. Use Supplier Item Mapping or Bulk Supplier Assignment to assign suppliers.
-5. Use Item Category Mapping or Bulk Category Assignment to assign categories.
-6. Use Discontinued Items / Bulk Mark Discontinued to block items that should not be reordered.
-7. Open Purchase Planning / Run Analysis.
-8. Select the FYs to include.
-9. Review the column mappings shown for stock and sales files.
-10. Click Run Analysis.
+1. Select the store from the sidebar.
+2. Open Stores / Store Data Status or Settings / Data File Status and confirm stock and sales files exist for that store.
+3. Open Categories / View Categories and check global category box quantities.
+4. Open Suppliers / View Suppliers and add or edit global supplier records if needed.
+5. Use Supplier Item Mapping or Bulk Supplier Assignment to assign suppliers for the selected store.
+6. Use Item Category Mapping or Bulk Category Assignment to assign categories for the selected store.
+7. Use Discontinued Items / Bulk Mark Discontinued to block selected-store items that should not be reordered.
+8. Open Purchase Planning / Run Analysis.
+9. Select the FYs to include.
+10. Review the column mappings shown for stock and sales files.
+11. Click Run Analysis.
 
 After the run finishes, the app saves a historical result and refreshes the active report.
 
@@ -108,7 +113,7 @@ View Sales lets you inspect cleaned sales rows, filter by FY, month, item text, 
 
 ### Stock
 
-View Stock shows current stock enriched with category, supplier, discontinued, velocity, risk, and PO fields when a report exists. Upload Stock replaces `data/stock/stock.csv`. Bulk Item Update routes to the discontinued bulk workflow.
+View Stock shows current stock enriched with category, supplier, discontinued, velocity, risk, and PO fields when a report exists. Upload Stock replaces `data/stock/{STORE_ID}/stock.csv` for the selected store. Bulk Item Update routes to the discontinued bulk workflow.
 
 ### Categories
 
@@ -128,7 +133,7 @@ Use Bulk Mark Discontinued to mark selected items as discontinued or remove disc
 
 ### Result History
 
-Use this section to inspect past runs, load an old run as the active result, or delete saved runs. The app also supports keeping the latest result while deleting older historical runs.
+Use this section to inspect past runs, load an old run as the active result, or delete saved runs. Each run keeps its input stock file, included FY sales files, and generated outputs under `data/runs/{STORE_ID}/{RUN_ID}/`.
 
 ### Reports
 

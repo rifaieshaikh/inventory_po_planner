@@ -6,6 +6,7 @@ import pandas as pd
 
 from .cleaner import clean_sales, clean_stock
 from .column_mapper import detect_columns
+from .file_manager import get_sales_year_from_path
 
 
 def read_csv_flexible(path: Path) -> pd.DataFrame:
@@ -23,7 +24,7 @@ def load_sales_files(paths: list[Path], mappings: dict[str, dict[str, str | None
     frames = []
     used_mappings = {}
     for path in paths:
-        fy = path.parent.name
+        fy = get_sales_year_from_path(path)
         raw = read_csv_flexible(path)
         mapping = mappings.get(fy) if mappings else detect_columns(raw.columns, "sales")
         used_mappings[fy] = mapping

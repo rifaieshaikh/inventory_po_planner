@@ -20,18 +20,25 @@ from src.recommendations import build_executive_summary, business_recommendation
 from src import result_store
 from src.sales_analysis import analyze_sales
 from src.stock_analysis import merge_stock_sales
+from src import store_manager
 from src.trend_analysis import analyze_trends
-from src.utils import MOVEMENT_ORDER, PRIORITY_ORDER, REPORT_PATH, RISK_ORDER, ensure_required_output_columns, normalize_text
+from src.utils import MOVEMENT_ORDER, PRIORITY_ORDER, RISK_ORDER, ensure_required_output_columns, normalize_text
 from src.validator import validate_data, validate_velocity_calculations
 
 
 st.set_page_config(page_title="Inventory PO Planner", layout="wide")
 file_manager.ensure_data_dirs()
+store_manager.ensure_store_master_file()
+DEFAULT_ACTIVE_STORE_ID = store_manager.create_default_store_if_missing()
+file_manager.migrate_single_store_data_to_default_store()
 mdm.ensure_master_files()
-result_store.ensure_result_dirs()
+mdm.ensure_store_master_files(DEFAULT_ACTIVE_STORE_ID)
+result_store.ensure_result_dirs(DEFAULT_ACTIVE_STORE_ID)
 
 
 DETAIL_COLUMNS = [
+    "Store ID",
+    "Store Name",
     "Item Code / SKU",
     "Item Key",
     "Supplier Name",
@@ -95,6 +102,8 @@ DETAIL_COLUMNS = [
 ]
 
 FINAL_PO_COLUMNS = [
+    "Store ID",
+    "Store Name",
     "Supplier Name",
     "Assigned Supplier ID",
     "Assigned Supplier Name",
@@ -122,6 +131,8 @@ FINAL_PO_COLUMNS = [
     "Reason",
 ]
 
+FINANCIAL_YEARS = ["22-23", "23-24", "24-25", "25-26", "26-27"]
+
 
 def modified_text(path: Path | None) -> str:
     if not path or not path.exists():
@@ -138,6 +149,88 @@ def widget_key(section: str, name: str, suffix: str = "") -> str:
         for part in parts
         if part is not None and str(part).strip() != ""
     )
+
+
+def sales_year(path: Path) -> str:
+    return file_manager.get_sales_year_from_path(path)
+
+
+def sales_years_from_paths(paths: list[Path]) -> list[str]:
+    return [sales_year(path) for path in paths]
+
+
+def ensure_active_store() -> tuple[str, str]:
+    store_manager.create_default_store_if_missing()
+    stores = store_manager.load_stores(active_only=True)
+    if stores.empty:
+        store_manager.reactivate_store(store_manager.DEFAULT_STORE_ID)
+        stores = store_manager.load_stores(active_only=True)
+    if stores.empty:
+        store_id = store_manager.DEFAULT_STORE_ID
+        store_name = store_manager.DEFAULT_STORE_NAME
+    else:
+        selected = st.session_state.get("active_store_id", "")
+        valid_ids = set(stores["Store ID"].astype(str))
+        if selected not in valid_ids:
+            selected = str(stores.iloc[0]["Store ID"])
+        row = stores[stores["Store ID"].astype(str).eq(selected)].iloc[0]
+        store_id = str(row["Store ID"])
+        store_name = str(row["Store Name"])
+    file_manager.ensure_store_dirs(store_id)
+    mdm.ensure_store_master_files(store_id)
+    result_store.ensure_result_dirs(store_id)
+    st.session_state["active_store_id"] = store_id
+    st.session_state["active_store_name"] = store_name
+    return store_id, store_name
+
+
+def active_store_id() -> str:
+    return ensure_active_store()[0]
+
+
+def active_store_name() -> str:
+    return ensure_active_store()[1]
+
+
+def store_caption(prefix: str = "Selected Store") -> None:
+    st.caption(f"{prefix}: {active_store_name()} ({active_store_id()})")
+
+
+def add_store_context(df: pd.DataFrame, store_id: str, store_name: str) -> pd.DataFrame:
+    result = df.copy()
+    if "Store Name" not in result.columns:
+        result.insert(0, "Store Name", store_name)
+    else:
+        result["Store Name"] = result["Store Name"].replace("", store_name).fillna(store_name)
+    if "Store ID" not in result.columns:
+        result.insert(0, "Store ID", store_id)
+    else:
+        result["Store ID"] = result["Store ID"].replace("", store_id).fillna(store_id)
+    return result
+
+
+def set_active_result_state(loaded: dict, source: str, store_id: str) -> None:
+    st.session_state["report"] = loaded["report"]
+    st.session_state["report_store_id"] = store_id
+    st.session_state["active_run_id"] = loaded["manifest"].get("run_id", "")
+    st.session_state["active_result_source"] = source
+    st.session_state["active_manifest"] = loaded["manifest"]
+    st.session_state["active_result_path"] = str(loaded["path"])
+    st.session_state["export_path"] = loaded["excel_path"]
+
+
+def clear_active_result_state() -> None:
+    for key in [
+        "report",
+        "report_store_id",
+        "active_run_id",
+        "active_result_source",
+        "active_manifest",
+        "active_result_path",
+        "export_path",
+        "supplier_ready_po_edited_df",
+    ]:
+        st.session_state.pop(key, None)
 
 
 def mapping_editor(path: Path, data_type: str, key_prefix: str) -> dict[str, str | None]:
@@ -163,22 +256,23 @@ def mapping_editor(path: Path, data_type: str, key_prefix: str) -> dict[str, str
 
 def refresh_report() -> None:
     if stock_path and sales_paths:
-        report = build_report(stock_path, sales_paths, settings, sales_mappings, stock_mapping)
+        store_id, store_name = ensure_active_store()
+        report = build_report(store_id, store_name, stock_path, sales_paths, settings, sales_mappings, stock_mapping)
         st.session_state["report"] = report
+        st.session_state["report_store_id"] = store_id
         run_id = result_store.save_analysis_result(
+            store_id,
             report,
             settings,
-            [path.parent.name for path in sales_paths],
+            sales_years_from_paths(sales_paths),
             stock_path,
             sales_paths,
         )
         st.session_state["active_run_id"] = run_id
         st.session_state["active_result_source"] = "new_run"
-        loaded = result_store.load_latest_result()
+        loaded = result_store.load_latest_result(store_id)
         if loaded:
-            st.session_state["active_manifest"] = loaded["manifest"]
-            st.session_state["active_result_path"] = str(loaded["path"])
-            st.session_state["export_path"] = loaded["excel_path"]
+            set_active_result_state(loaded, "new_run", store_id)
 
 
 def render_item_performance(row: pd.Series, monthly: pd.DataFrame, section_prefix: str = "item_popup") -> None:
@@ -293,6 +387,7 @@ def render_item_performance(row: pd.Series, monthly: pd.DataFrame, section_prefi
             category_name = str(category_row.get("Category Name", "Uncategorized")).strip() or "Uncategorized"
             category_id = str(category_row.get("Category ID", "")).strip()
             mdm.set_discontinued_item(
+                store_id=active_store_id(),
                 item_key=item_key,
                 item_code=str(row.get("Item Code / SKU", "")),
                 item_name=item_name,
@@ -303,8 +398,8 @@ def render_item_performance(row: pd.Series, monthly: pd.DataFrame, section_prefi
                 supplier_id, supplier_name = "", "Unknown Supplier"
             else:
                 supplier_id, supplier_name = supplier_choice.split(" | ", 1)
-            mdm.set_item_supplier(item_key, str(row.get("Item Code / SKU", "")), item_name, supplier_id, supplier_name)
-            mdm.set_item_category(item_key, str(row.get("Item Code / SKU", "")), item_name, category_id, category_name)
+            mdm.set_item_supplier(active_store_id(), item_key, str(row.get("Item Code / SKU", "")), item_name, supplier_id, supplier_name)
+            mdm.set_item_category(active_store_id(), item_key, str(row.get("Item Code / SKU", "")), item_name, category_id, category_name)
             refresh_report()
             st.success("Item settings saved.")
             st.rerun()
@@ -375,7 +470,7 @@ def render_supplier_management(detail: pd.DataFrame | None = None, section_prefi
 
 
 def render_discontinued_items(detail: pd.DataFrame, section_prefix: str = "discontinued_items") -> None:
-    discontinued_master = mdm.load_discontinued_items()
+    discontinued_master = mdm.load_discontinued_items(active_store_id())
     current = detail[detail.get("Is Discontinued", pd.Series("No", index=detail.index)).astype(str).str.upper().eq("YES")].copy() if detail is not None and not detail.empty else pd.DataFrame()
     st.subheader("Discontinued Items")
     search = st.text_input("Search discontinued items", key=widget_key(section_prefix, "search"))
@@ -398,7 +493,7 @@ def render_discontinued_items(detail: pd.DataFrame, section_prefix: str = "disco
         selected_key = selected.split(" | ", 1)[0]
         if st.button("Remove Discontinued Status", key=widget_key(section_prefix, "remove_status", selected_key)):
             row = view[view["Item Key"].astype(str).eq(selected_key)].iloc[0]
-            mdm.set_discontinued_item(selected_key, str(row.get("Item Code / SKU", "")), str(row.get("Item Name", "")), False, "")
+            mdm.set_discontinued_item(active_store_id(), selected_key, str(row.get("Item Code / SKU", "")), str(row.get("Item Name", "")), False, "")
             refresh_report()
             st.success("Discontinued status removed.")
             st.rerun()
@@ -471,11 +566,11 @@ def render_add_category_page() -> None:
 def _category_detail_df(report: dict | None) -> pd.DataFrame:
     if report is not None and "Detailed Item Analysis" in report and not report["Detailed Item Analysis"].empty:
         return report["Detailed Item Analysis"].copy()
-    path = file_manager.get_stock_file_path()
+    path = file_manager.get_stock_file_path(active_store_id())
     if not path:
         return pd.DataFrame()
     stock, _ = load_stock_file(path, {})
-    return mdm.enrich_with_master_data(ensure_required_output_columns(stock))
+    return mdm.enrich_with_master_data(ensure_required_output_columns(stock), active_store_id())
 
 
 def render_item_category_mapping_page(report: dict | None) -> None:
@@ -519,6 +614,7 @@ def render_item_category_mapping_page(report: dict | None) -> None:
     if st.button("Save Category", key=widget_key("item_category_mapping", "save", selected_key)):
         cat_row = cat_lookup.get(chosen, cat_lookup.get("Uncategorized", {}))
         mdm.set_item_category(
+            active_store_id(),
             selected_key,
             str(row.get("Item Code / SKU", "")),
             str(row.get("Item Name", "")),
@@ -562,6 +658,7 @@ def render_bulk_category_assignment_page(report: dict | None) -> None:
         cat_row = cat_lookup.get(chosen, cat_lookup.get("Uncategorized", {}))
         for _, row in selected.iterrows():
             mdm.set_item_category(
+                active_store_id(),
                 str(row.get("Item Key", "")),
                 str(row.get("Item Code / SKU", "")),
                 str(row.get("Item Name", "")),
@@ -575,6 +672,7 @@ def render_bulk_category_assignment_page(report: dict | None) -> None:
         unc = mdm.ensure_uncategorized_category_exists()
         for _, row in selected.iterrows():
             mdm.set_item_category(
+                active_store_id(),
                 str(row.get("Item Key", "")),
                 str(row.get("Item Code / SKU", "")),
                 str(row.get("Item Name", "")),
@@ -586,7 +684,15 @@ def render_bulk_category_assignment_page(report: dict | None) -> None:
         st.rerun()
 
 
-def build_report(stock_path: Path, sales_paths: list[Path], settings: dict, sales_mappings: dict, stock_mapping: dict) -> dict[str, pd.DataFrame]:
+def build_report(
+    store_id: str,
+    store_name: str,
+    stock_path: Path,
+    sales_paths: list[Path],
+    settings: dict,
+    sales_mappings: dict,
+    stock_mapping: dict,
+) -> dict[str, pd.DataFrame]:
     stock, _ = load_stock_file(stock_path, stock_mapping)
     sales, _ = load_sales_files(sales_paths, sales_mappings)
     validation = validate_data(sales, stock)
@@ -594,7 +700,7 @@ def build_report(stock_path: Path, sales_paths: list[Path], settings: dict, sale
     trend = analyze_trends(monthly, settings["recent_period_mode"], settings["recent_period_months"])
     merged = merge_stock_sales(sales_summary, trend, stock)
     detail = ensure_required_output_columns(merged)
-    detail = mdm.enrich_with_master_data(detail)
+    detail = mdm.enrich_with_master_data(detail, store_id)
     detail = calculate_po(detail, settings)
     detail = apply_discontinued_po_rules(detail)
     if settings["exclude_dormant_dead"]:
@@ -604,6 +710,9 @@ def build_report(stock_path: Path, sales_paths: list[Path], settings: dict, sale
     detail = ensure_required_output_columns(detail)
     detail = apply_discontinued_po_rules(detail)
     velocity_warnings = validate_velocity_calculations(detail)
+    detail = add_store_context(detail, store_id, store_name)
+    validation = add_store_context(validation, store_id, store_name)
+    velocity_warnings = add_store_context(velocity_warnings, store_id, store_name)
     detail = detail[[col for col in DETAIL_COLUMNS if col in detail.columns]].copy()
     detail = apply_discontinued_po_rules(detail)
 
@@ -628,13 +737,25 @@ def build_report(stock_path: Path, sales_paths: list[Path], settings: dict, sale
     else:
         final_po = pd.DataFrame(columns=FINAL_PO_COLUMNS)
 
-    master_warnings = mdm.master_validation_warnings(detail, final_po)
+    master_warnings = mdm.master_validation_warnings(detail, final_po, store_id)
+    master_warnings = add_store_context(master_warnings, store_id, store_name)
     if not master_warnings.empty:
         validation = pd.concat([validation, master_warnings], ignore_index=True)
     summary = build_executive_summary(detail)
     supplier_po = supplier_ready_po(final_po)
+    supplier_po = add_store_context(supplier_po, store_id, store_name)
     cat_summary = category_size_summary(detail)
+    cat_summary = add_store_context(cat_summary, store_id, store_name)
     recs = business_recommendations(detail, cat_summary)
+    store_summary = pd.DataFrame(
+        [
+            ["Store ID", store_id],
+            ["Store Name", store_name],
+            ["Stock File", str(stock_path)],
+            ["Sales Years", ", ".join(sales_years_from_paths(sales_paths))],
+        ],
+        columns=["Metric", "Value"],
+    )
     velocity_analysis = detail[
         [
             "Item Code / SKU",
@@ -650,6 +771,7 @@ def build_report(stock_path: Path, sales_paths: list[Path], settings: dict, sale
             "Consistency Class",
         ]
     ].copy()
+    velocity_analysis = add_store_context(velocity_analysis, store_id, store_name)
     trend_analysis = detail[
         [
             "Item Code / SKU",
@@ -663,6 +785,7 @@ def build_report(stock_path: Path, sales_paths: list[Path], settings: dict, sale
             "Consistency Class",
         ]
     ].copy()
+    trend_analysis = add_store_context(trend_analysis, store_id, store_name)
     stock_risk = detail[
         [
             "Item Code / SKU",
@@ -676,6 +799,7 @@ def build_report(stock_path: Path, sales_paths: list[Path], settings: dict, sale
             "PO Optimization Decision",
         ]
     ].copy()
+    stock_risk = add_store_context(stock_risk, store_id, store_name)
     overstock_dead = detail[
         detail["Stock Risk Level"].eq("Overstock Risk")
         | detail["Velocity Class"].isin(["Dormant", "Dead Stock / No Sales"])
@@ -697,6 +821,7 @@ def build_report(stock_path: Path, sales_paths: list[Path], settings: dict, sale
         columns=["Assumption", "Detail"],
     )
     return {
+        "Store Summary": store_summary,
         "Executive Summary": summary,
         "Data Validation": validation,
         "Velocity Calculation Warnings": velocity_warnings,
@@ -711,9 +836,9 @@ def build_report(stock_path: Path, sales_paths: list[Path], settings: dict, sale
         "Overstock Dead Stock": overstock_dead,
         "Discontinued Items": discontinued_items,
         "Supplier Master": mdm.load_suppliers(active_only=False),
-        "Item Supplier Mapping": mdm.load_item_suppliers(),
+        "Item Supplier Mapping": add_store_context(mdm.load_item_suppliers(store_id), store_id, store_name),
         "Categories": mdm.load_categories(active_only=False),
-        "Item Category Mapping": mdm.load_item_categories(),
+        "Item Category Mapping": add_store_context(mdm.load_item_categories(store_id), store_id, store_name),
         "Business Recommendations": recs,
         "Assumptions": assumptions,
         "_Debug Inputs": {
@@ -758,23 +883,27 @@ def current_settings() -> dict:
 
 
 def current_sales_paths() -> list[Path]:
-    years = file_manager.list_available_sales_years()
+    store_id = active_store_id()
+    years = file_manager.list_available_sales_years(store_id)
     selected = st.session_state.get(widget_key("sidebar", "selected_years"), years)
-    return file_manager.get_sales_file_paths(selected)
+    return file_manager.get_sales_file_paths(store_id, selected)
 
 
 def get_active_report() -> dict | None:
-    if "report" in st.session_state and st.session_state["report"]:
+    store_id = active_store_id()
+    if (
+        "report" in st.session_state
+        and st.session_state["report"]
+        and st.session_state.get("report_store_id") == store_id
+    ):
         return st.session_state["report"]
-    loaded = result_store.load_latest_result()
+    if st.session_state.get("report_store_id") and st.session_state.get("report_store_id") != store_id:
+        clear_active_result_state()
+    loaded = result_store.load_latest_result(store_id)
     if loaded:
-        st.session_state["report"] = loaded["report"]
-        st.session_state["active_run_id"] = loaded["manifest"].get("run_id", "")
-        st.session_state["active_result_source"] = "latest"
-        st.session_state["active_manifest"] = loaded["manifest"]
-        st.session_state["active_result_path"] = str(loaded["path"])
-        st.session_state["export_path"] = loaded["excel_path"]
+        set_active_result_state(loaded, "latest", store_id)
         return loaded["report"]
+    clear_active_result_state()
     return None
 
 
@@ -791,14 +920,16 @@ def report_or_warning() -> dict | None:
 
 def run_analysis(selected_paths: list[Path], show_mapping: bool = False) -> None:
     global stock_path, sales_paths, settings, sales_mappings, stock_mapping
-    stock_path = file_manager.get_stock_file_path()
+    store_id, store_name = ensure_active_store()
+    stock_path = file_manager.get_stock_file_path(store_id)
     sales_paths = selected_paths
     settings = current_settings()
     sales_mappings = {}
     stock_mapping = {}
     if show_mapping:
         for path in sales_paths:
-            sales_mappings[path.parent.name] = mapping_editor(path, "sales", f"analysis_sales_{path.parent.name}")
+            fy = sales_year(path)
+            sales_mappings[fy] = mapping_editor(path, "sales", f"analysis_sales_{fy}")
         stock_mapping = mapping_editor(stock_path, "stock", "analysis_stock") if stock_path else {}
         for fy_key, mapping in sales_mappings.items():
             qty_error = validate_sales_quantity_column(mapping.get("sales_qty"))
@@ -806,22 +937,22 @@ def run_analysis(selected_paths: list[Path], show_mapping: bool = False) -> None
                 st.error(f"{qty_error} FY: {fy_key}")
                 st.stop()
     with st.spinner("Analyzing inventory, sales trends, and purchase requirements..."):
-        report = build_report(stock_path, sales_paths, settings, sales_mappings, stock_mapping)
+        report = build_report(store_id, store_name, stock_path, sales_paths, settings, sales_mappings, stock_mapping)
         st.session_state["report"] = report
+        st.session_state["report_store_id"] = store_id
         run_id = result_store.save_analysis_result(
+            store_id,
             report,
             settings,
-            [path.parent.name for path in sales_paths],
+            sales_years_from_paths(sales_paths),
             stock_path,
             sales_paths,
         )
         st.session_state["active_run_id"] = run_id
         st.session_state["active_result_source"] = "new_run"
-        loaded = result_store.load_latest_result()
+        loaded = result_store.load_latest_result(store_id)
         if loaded:
-            st.session_state["active_manifest"] = loaded["manifest"]
-            st.session_state["active_result_path"] = str(loaded["path"])
-            st.session_state["export_path"] = loaded["excel_path"]
+            set_active_result_state(loaded, "new_run", store_id)
 
 
 def visible_columns(df: pd.DataFrame, columns: list[str]) -> list[str]:
@@ -1050,31 +1181,44 @@ def render_business_recommendations_page(report: dict | None) -> None:
 
 def render_sales_upload_page() -> None:
     st.title("Upload Item-wise Sales")
-    fy = st.selectbox("Financial Year", ["22-23", "23-24", "24-25", "25-26", "26-27"], index=4, key=widget_key("sales_upload", "financial_year"))
-    target = file_manager.SALES_DIR / fy / "item-wise-sales.csv"
+    store_caption()
+    store_id = active_store_id()
+    fy = st.selectbox("Financial Year", FINANCIAL_YEARS, index=4, key=widget_key("sales_upload", "financial_year"))
+    target = file_manager.get_sales_file_path_for_year(store_id, fy)
     if target.exists():
-        st.warning(f"Existing file for {fy} will be replaced.")
+        st.warning(f"Existing file for {active_store_name()} / {fy} will be replaced.")
     upload = st.file_uploader("Item-wise sales CSV", type=["csv"], key=widget_key("sales_upload", "file"))
     if st.button("Save / Replace Sales File", type="primary", key=widget_key("sales_upload", "save")):
         if upload is None:
             st.error("Choose a sales CSV before saving.")
         else:
-            saved = file_manager.save_sales_file(upload, fy)
+            saved = file_manager.save_sales_file(store_id, upload, fy)
             st.success(f"Saved to {saved}")
             st.rerun()
     st.subheader("Available FY Files")
-    rows = [{"FY": y, "Path": str((file_manager.SALES_DIR / y / "item-wise-sales.csv")), "Last Modified": modified_text(file_manager.SALES_DIR / y / "item-wise-sales.csv")} for y in file_manager.list_available_sales_years()]
+    rows = [
+        {
+            "Store ID": store_id,
+            "Store Name": active_store_name(),
+            "FY": y,
+            "Path": str(file_manager.get_sales_file_path_for_year(store_id, y)),
+            "Last Modified": modified_text(file_manager.get_sales_file_path_for_year(store_id, y)),
+        }
+        for y in file_manager.list_available_sales_years(store_id)
+    ]
     st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
 
 
 def render_sales_view_page() -> None:
     st.title("View Item-wise Sales")
-    years = file_manager.list_available_sales_years()
+    store_caption()
+    store_id = active_store_id()
+    years = file_manager.list_available_sales_years(store_id)
     if not years:
-        st.warning("No item-wise sales files found.")
+        st.warning("No item-wise sales files found for the selected store.")
         return
     selected = st.multiselect("FY", years, default=years, key=widget_key("sales_view", "fy_filter"))
-    paths = file_manager.get_sales_file_paths(selected)
+    paths = file_manager.get_sales_file_paths(store_id, selected)
     sales, _ = load_sales_files(paths, {})
     if sales.empty:
         st.warning("No sales rows found.")
@@ -1110,31 +1254,36 @@ def render_sales_view_page() -> None:
 
 def render_stock_upload_page() -> None:
     st.title("Upload Stock")
-    path = file_manager.get_stock_file_path()
+    store_caption()
+    store_id = active_store_id()
+    path = file_manager.get_stock_file_path(store_id)
     if path:
-        st.warning("Existing stock.csv will be replaced.")
+        st.warning(f"Existing stock.csv for {active_store_name()} will be replaced.")
         st.caption(f"Current file last modified: {modified_text(path)}")
     upload = st.file_uploader("Stock CSV", type=["csv"], key=widget_key("stock_upload", "file"))
     if st.button("Save / Replace Stock File", type="primary", key=widget_key("stock_upload", "save")):
         if upload is None:
             st.error("Choose a stock CSV before saving.")
         else:
-            saved = file_manager.save_stock_file(upload)
+            saved = file_manager.save_stock_file(store_id, upload)
             st.success(f"Saved to {saved}")
             st.rerun()
 
 
 def render_stock_view_page(report: dict | None) -> None:
     st.title("View Stock")
+    store_caption()
+    store_id = active_store_id()
     if report is not None:
         detail = report["Detailed Item Analysis"].copy()
     else:
-        path = file_manager.get_stock_file_path()
+        path = file_manager.get_stock_file_path(store_id)
         if not path:
-            st.warning("Stock file is missing.")
+            st.warning("Stock file is missing for the selected store.")
             return
         stock, _ = load_stock_file(path, {})
-        detail = mdm.enrich_with_master_data(ensure_required_output_columns(stock))
+        detail = mdm.enrich_with_master_data(ensure_required_output_columns(stock), store_id)
+        detail = add_store_context(detail, store_id, active_store_name())
     view = filter_detail(detail, "stock_view")
     if "Category Name" in view.columns:
         uncategorized_only = st.checkbox("Show Uncategorized only", key=widget_key("stock_view", "uncategorized_only"))
@@ -1215,6 +1364,7 @@ def current_category_label(row: pd.Series) -> str:
 
 def render_bulk_supplier_assignment_page(report: dict | None) -> None:
     st.title("Bulk Supplier Assignment")
+    store_caption()
     if report is None:
         st.warning("Run analysis first.")
         return
@@ -1235,13 +1385,13 @@ def render_bulk_supplier_assignment_page(report: dict | None) -> None:
     if col_a.button("Assign Supplier to Selected Items", key=widget_key("bulk_supplier", "assign")):
         supplier_id, supplier_name = selected_supplier_parts(choice)
         for _, row in selected.iterrows():
-            mdm.set_item_supplier(str(row.get("Item Key", "")), str(row.get("Item Code / SKU", "")), str(row.get("Item Name", "")), supplier_id, supplier_name)
+            mdm.set_item_supplier(active_store_id(), str(row.get("Item Key", "")), str(row.get("Item Code / SKU", "")), str(row.get("Item Name", "")), supplier_id, supplier_name)
         refresh_report()
         st.success(f"Updated {len(selected)} item(s).")
         st.rerun()
     if col_b.button("Clear Supplier for Selected Items", key=widget_key("bulk_supplier", "clear")):
         for _, row in selected.iterrows():
-            mdm.set_item_supplier(str(row.get("Item Key", "")), str(row.get("Item Code / SKU", "")), str(row.get("Item Name", "")), "", "Unknown Supplier")
+            mdm.set_item_supplier(active_store_id(), str(row.get("Item Key", "")), str(row.get("Item Code / SKU", "")), str(row.get("Item Name", "")), "", "Unknown Supplier")
         refresh_report()
         st.success(f"Cleared supplier for {len(selected)} item(s).")
         st.rerun()
@@ -1249,6 +1399,7 @@ def render_bulk_supplier_assignment_page(report: dict | None) -> None:
 
 def render_bulk_mark_discontinued_page(report: dict | None) -> None:
     st.title("Bulk Mark Discontinued")
+    store_caption()
     if report is None:
         st.warning("Run analysis first.")
         return
@@ -1265,13 +1416,13 @@ def render_bulk_mark_discontinued_page(report: dict | None) -> None:
     col_a, col_b = st.columns(2)
     if col_a.button("Mark Selected as Discontinued", key=widget_key("bulk_discontinued", "mark")):
         for _, row in selected.iterrows():
-            mdm.set_discontinued_item(str(row.get("Item Key", "")), str(row.get("Item Code / SKU", "")), str(row.get("Item Name", "")), True, reason)
+            mdm.set_discontinued_item(active_store_id(), str(row.get("Item Key", "")), str(row.get("Item Code / SKU", "")), str(row.get("Item Name", "")), True, reason)
         refresh_report()
         st.success(f"Marked {len(selected)} item(s) discontinued.")
         st.rerun()
     if col_b.button("Remove Discontinued Status for Selected", key=widget_key("bulk_discontinued", "remove")):
         for _, row in selected.iterrows():
-            mdm.set_discontinued_item(str(row.get("Item Key", "")), str(row.get("Item Code / SKU", "")), str(row.get("Item Name", "")), False, "")
+            mdm.set_discontinued_item(active_store_id(), str(row.get("Item Key", "")), str(row.get("Item Code / SKU", "")), str(row.get("Item Name", "")), False, "")
         refresh_report()
         st.success(f"Updated {len(selected)} item(s).")
         st.rerun()
@@ -1303,7 +1454,8 @@ def render_suppliers_view_page(report: dict | None) -> None:
 
 def render_supplier_item_mapping_page(report: dict | None) -> None:
     st.title("Supplier Item Mapping")
-    mappings = mdm.load_item_suppliers()
+    store_caption()
+    mappings = mdm.load_item_suppliers(active_store_id())
     st.dataframe(mappings, hide_index=True, use_container_width=True)
     if report is not None:
         st.subheader("Current Item Assignments")
@@ -1314,22 +1466,24 @@ def render_supplier_item_mapping_page(report: dict | None) -> None:
 def render_purchase_run_analysis_page() -> None:
     global stock_path, sales_paths, settings, sales_mappings, stock_mapping
     st.title("Run Analysis")
-    stock = file_manager.get_stock_file_path()
-    years = file_manager.list_available_sales_years()
+    store_id, store_name = ensure_active_store()
+    store_caption()
+    years = file_manager.list_available_sales_years(store_id)
+    stock = file_manager.get_stock_file_path(store_id)
     selected = st.multiselect("Include FYs", years, default=st.session_state.get(widget_key("sidebar", "selected_years"), years), key=widget_key("sidebar", "selected_years"))
-    paths = file_manager.get_sales_file_paths(selected)
+    paths = file_manager.get_sales_file_paths(store_id, selected)
     c1, c2, c3 = st.columns(3)
     c1.metric("Stock File", "Available" if stock else "Missing")
     c2.metric("Sales Years", len(paths))
-    c3.metric("Export Path", str(REPORT_PATH.relative_to(Path(__file__).resolve().parent)))
+    c3.metric("Export Path", str((result_store.latest_dir(store_id) / "inventory_report.xlsx").relative_to(Path(__file__).resolve().parent)))
     if stock:
         st.info(f"Stock file available. Last modified: {modified_text(stock)}")
     else:
-        st.warning("Stock file is missing. Upload stock.csv.")
+        st.warning(f"Stock file is missing for {active_store_name()}. Upload stock.csv.")
     if paths:
-        st.info("Saved sales years: " + ", ".join(path.parent.name for path in paths))
+        st.info("Saved sales years: " + ", ".join(sales_years_from_paths(paths)))
     else:
-        st.warning("No item-wise sales files found. Upload at least one FY sales file.")
+        st.warning("No item-wise sales files found for the selected store. Upload at least one FY sales file.")
     st.subheader("Column Mapping")
     if stock and paths:
         stock_path = stock
@@ -1337,7 +1491,8 @@ def render_purchase_run_analysis_page() -> None:
         settings = current_settings()
         sales_mappings = {}
         for path in sales_paths:
-            sales_mappings[path.parent.name] = mapping_editor(path, "sales", f"analysis_sales_{path.parent.name}")
+            fy = sales_year(path)
+            sales_mappings[fy] = mapping_editor(path, "sales", f"analysis_sales_{fy}")
         stock_mapping = mapping_editor(stock_path, "stock", "analysis_stock")
         for fy_key, mapping in sales_mappings.items():
             qty_error = validate_sales_quantity_column(mapping.get("sales_qty"))
@@ -1346,22 +1501,22 @@ def render_purchase_run_analysis_page() -> None:
                 st.stop()
         if st.button("Run Analysis", type="primary", key=widget_key("purchase_run", "run_analysis")):
             with st.spinner("Analyzing inventory, sales trends, and purchase requirements..."):
-                report = build_report(stock_path, sales_paths, settings, sales_mappings, stock_mapping)
+                report = build_report(store_id, store_name, stock_path, sales_paths, settings, sales_mappings, stock_mapping)
                 st.session_state["report"] = report
+                st.session_state["report_store_id"] = store_id
                 run_id = result_store.save_analysis_result(
+                    store_id,
                     report,
                     settings,
-                    [path.parent.name for path in sales_paths],
+                    sales_years_from_paths(sales_paths),
                     stock_path,
                     sales_paths,
                 )
-                loaded = result_store.load_latest_result()
+                loaded = result_store.load_latest_result(store_id)
                 st.session_state["active_run_id"] = run_id
                 st.session_state["active_result_source"] = "new_run"
                 if loaded:
-                    st.session_state["active_manifest"] = loaded["manifest"]
-                    st.session_state["active_result_path"] = str(loaded["path"])
-                    st.session_state["export_path"] = loaded["excel_path"]
+                    set_active_result_state(loaded, "new_run", store_id)
             st.success(f"Analysis completed and saved as {run_id}.")
             st.rerun()
     else:
@@ -1542,15 +1697,22 @@ def render_supplier_ready_po_page(report: dict | None) -> None:
     col_b.metric("Total Boxes", f"{edited_df['Boxes'].sum():,.0f}")
     col_c.metric("Total Amount", f"{edited_df['Total Amount'].sum():,.2f}")
 
-    result_dir = Path(st.session_state.get("active_result_path", result_store.LATEST_DIR))
+    store_id = active_store_id()
+    result_dir = Path(st.session_state.get("active_result_path", result_store.latest_dir(store_id)))
     if st.button("Save Edited Supplier PO for this run", key=widget_key("supplier_ready_po", "save_edited", active_run_id)):
-        result_dir.mkdir(parents=True, exist_ok=True)
-        save_path = result_dir / "supplier_ready_po_edited.csv"
-        edited_df.to_csv(save_path, index=False)
+        save_targets = [result_dir / "supplier_ready_po_edited.csv"]
+        latest_target = result_store.latest_dir(store_id) / "supplier_ready_po_edited.csv"
+        history_target = result_store.run_result_dir(store_id, active_run_id) / "supplier_ready_po_edited.csv"
+        for target in [latest_target, history_target]:
+            if target not in save_targets:
+                save_targets.append(target)
+        for save_path in save_targets:
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+            edited_df.to_csv(save_path, index=False)
         st.session_state["supplier_ready_po_edited_df"] = edited_df.copy()
         if isinstance(st.session_state.get("report"), dict):
             st.session_state["report"]["Supplier Ready PO Edited"] = edited_df.copy()
-        st.success(f"Saved edited supplier PO to {save_path}")
+        st.success(f"Saved edited supplier PO for {active_store_name()}.")
     st.download_button(
         "Download Edited Supplier PO CSV",
         data=edited_df.to_csv(index=False),
@@ -1571,6 +1733,7 @@ def render_discontinued_view_page(report: dict | None) -> None:
 
 def render_excel_export_page(report: dict | None) -> None:
     st.title("Excel Export")
+    store_caption()
     if report is None:
         st.warning("No analysis result available. Run analysis first or load from Result History.")
         return
@@ -1578,7 +1741,7 @@ def render_excel_export_page(report: dict | None) -> None:
     if manifest:
         st.caption(f"Active Run ID: {manifest.get('run_id', '')}")
         st.caption(f"Report Created At: {manifest.get('created_at_display', manifest.get('created_at', ''))}")
-    active_path = Path(st.session_state.get("active_result_path", result_store.LATEST_DIR))
+    active_path = Path(st.session_state.get("active_result_path", result_store.latest_dir(active_store_id())))
     export_path = Path(st.session_state.get("export_path", active_path / "inventory_report.xlsx"))
     if not export_path.exists():
         export_path = export_excel(report, active_path / "inventory_report.xlsx")
@@ -1596,11 +1759,13 @@ def render_excel_export_page(report: dict | None) -> None:
 
 def render_result_history_page(report: dict | None) -> None:
     st.title("Result History")
-    runs = result_store.list_result_runs()
+    store_caption()
+    store_id = active_store_id()
+    runs = result_store.list_result_runs(store_id)
     if runs.empty:
-        st.info("No saved analysis results found. Run analysis to generate one.")
+        st.info("No saved analysis results found for the selected store. Run analysis to generate one.")
         return
-    display = runs[["Run ID", "Created At", "Sales Years", "Total Items", "PO Items", "Urgent Items", "High Items", "Total PO Value"]].copy()
+    display = runs[["Store ID", "Store Name", "Run ID", "Created At", "Sales Years", "Total Items", "PO Items", "Urgent Items", "High Items", "Total PO Value"]].copy()
     st.dataframe(display, hide_index=True, use_container_width=True)
     run_options = runs["Run ID"].astype(str).tolist()
     current = st.session_state.get("selected_result_run_id", run_options[0])
@@ -1610,28 +1775,18 @@ def render_result_history_page(report: dict | None) -> None:
 
     col_a, col_b = st.columns(2)
     if col_a.button("Load Selected Result", key=widget_key("result_history", "load_selected")):
-        loaded = result_store.load_result(selected_run)
+        loaded = result_store.load_result(store_id, selected_run)
         if loaded:
-            st.session_state["report"] = loaded["report"]
-            st.session_state["active_run_id"] = loaded["manifest"].get("run_id", selected_run)
-            st.session_state["active_result_source"] = "history"
-            st.session_state["active_manifest"] = loaded["manifest"]
-            st.session_state["active_result_path"] = str(loaded["path"])
-            st.session_state["export_path"] = loaded["excel_path"]
+            set_active_result_state(loaded, "history", store_id)
             st.success(f"Loaded {selected_run} for this session.")
             st.rerun()
         else:
             st.error("Could not load selected result.")
     if col_b.button("Make Selected Result Latest", key=widget_key("result_history", "make_latest")):
-        if result_store.copy_result_to_latest(selected_run):
-            loaded = result_store.load_latest_result()
+        if result_store.copy_result_to_latest(store_id, selected_run):
+            loaded = result_store.load_latest_result(store_id)
             if loaded:
-                st.session_state["report"] = loaded["report"]
-                st.session_state["active_run_id"] = loaded["manifest"].get("run_id", selected_run)
-                st.session_state["active_result_source"] = "latest"
-                st.session_state["active_manifest"] = loaded["manifest"]
-                st.session_state["active_result_path"] = str(loaded["path"])
-                st.session_state["export_path"] = loaded["excel_path"]
+                set_active_result_state(loaded, "latest", store_id)
             st.success(f"{selected_run} is now the latest result.")
             st.rerun()
         else:
@@ -1641,23 +1796,18 @@ def render_result_history_page(report: dict | None) -> None:
     confirm = st.checkbox("I understand this will delete the selected result.", key=widget_key("result_history", "confirm_delete"))
     if st.button("Delete Selected Result", disabled=not confirm, key=widget_key("result_history", "delete_selected")):
         active_run = st.session_state.get("active_run_id", "")
-        if result_store.delete_result(selected_run):
+        if result_store.delete_result(store_id, selected_run):
             if selected_run == active_run:
-                st.session_state.pop("report", None)
-                loaded = result_store.load_latest_result()
+                clear_active_result_state()
+                loaded = result_store.load_latest_result(store_id)
                 if loaded:
-                    st.session_state["report"] = loaded["report"]
-                    st.session_state["active_run_id"] = loaded["manifest"].get("run_id", "")
-                    st.session_state["active_result_source"] = "latest"
-                    st.session_state["active_manifest"] = loaded["manifest"]
-                    st.session_state["active_result_path"] = str(loaded["path"])
-                    st.session_state["export_path"] = loaded["excel_path"]
+                    set_active_result_state(loaded, "latest", store_id)
             st.success(f"Deleted {selected_run}.")
             st.rerun()
         else:
             st.error("Could not delete selected result.")
     if st.button("Delete Old Results Except Latest", key=widget_key("result_history", "delete_old_except_latest")):
-        deleted = result_store.delete_all_results_except_latest()
+        deleted = result_store.delete_all_results_except_latest(store_id)
         st.success(f"Deleted {deleted} old result folder(s).")
         st.rerun()
 
@@ -1695,26 +1845,173 @@ def render_analysis_settings_page() -> None:
 
 def render_data_file_status_page() -> None:
     st.title("Data File Status")
-    stock = file_manager.get_stock_file_path()
+    store_caption()
+    store_id = active_store_id()
+    stock = file_manager.get_stock_file_path(store_id)
     sales_rows = []
-    for fy in file_manager.list_available_sales_years():
-        path = file_manager.SALES_DIR / fy / "item-wise-sales.csv"
-        sales_rows.append({"FY": fy, "Available": path.exists(), "Last Modified": modified_text(path), "Path": str(path)})
+    for fy in file_manager.list_available_sales_years(store_id):
+        path = file_manager.get_sales_file_path_for_year(store_id, fy)
+        sales_rows.append({"Store ID": store_id, "Store Name": active_store_name(), "FY": fy, "Available": path.exists(), "Last Modified": modified_text(path), "Path": str(path)})
+    stock_path = stock or (file_manager.get_store_stock_dir(store_id) / file_manager.STOCK_FILENAME)
+    stock_rows = [{"Store ID": store_id, "Store Name": active_store_name(), "Available": bool(stock), "Last Modified": modified_text(stock), "Path": str(stock_path)}]
     master_rows = []
     for name, path in {
-        "discontinued-items.csv": mdm.DISCONTINUED_PATH,
-        "item-suppliers.csv": mdm.ITEM_SUPPLIERS_PATH,
+        "discontinued-items.csv": mdm.discontinued_path(store_id),
+        "item-suppliers.csv": mdm.item_suppliers_path(store_id),
         "suppliers.csv": mdm.SUPPLIERS_PATH,
         "categories.csv": mdm.CATEGORIES_PATH,
-        "item-categories.csv": mdm.ITEM_CATEGORIES_PATH,
+        "item-categories.csv": mdm.item_categories_path(store_id),
+        "stores.csv": store_manager.STORES_PATH,
     }.items():
         master_rows.append({"File": name, "Available": path.exists(), "Last Modified": modified_text(path), "Path": str(path)})
     st.subheader("Stock")
-    st.dataframe(pd.DataFrame([{"Available": bool(stock), "Last Modified": modified_text(stock), "Path": str(stock) if stock else str(file_manager.STOCK_DIR / "stock.csv")}]), hide_index=True, use_container_width=True)
+    st.dataframe(pd.DataFrame(stock_rows), hide_index=True, use_container_width=True)
     st.subheader("Sales Files")
     st.dataframe(pd.DataFrame(sales_rows), hide_index=True, use_container_width=True)
     st.subheader("Master Files")
     st.dataframe(pd.DataFrame(master_rows), hide_index=True, use_container_width=True)
+
+
+def switch_active_store(store_id: str) -> None:
+    store = store_manager.get_store_by_id(store_id)
+    if not store:
+        return
+    st.session_state["active_store_id"] = str(store["Store ID"])
+    st.session_state["active_store_name"] = str(store["Store Name"])
+    clear_active_result_state()
+    loaded = result_store.load_latest_result(str(store["Store ID"]))
+    if loaded:
+        set_active_result_state(loaded, "latest", str(store["Store ID"]))
+
+
+def render_stores_view_page() -> None:
+    st.title("Stores")
+    stores = store_manager.load_stores(active_only=False)
+    search = st.text_input("Search stores", key=widget_key("stores_view", "search"))
+    view = stores.copy()
+    if search.strip() and not view.empty:
+        q = search.strip().upper()
+        view = view[view.apply(lambda r: q in " ".join(r.astype(str)).upper(), axis=1)]
+    st.dataframe(
+        view[visible_columns(view, ["Store ID", "Store Name", "Location", "Contact Person", "Phone", "Active", "Created At", "Updated At"])],
+        hide_index=True,
+        use_container_width=True,
+    )
+    if view.empty:
+        return
+    labels = [f"{r['Store ID']} | {r['Store Name']}" for _, r in view.iterrows()]
+    selected = st.selectbox("Select store", labels, key=widget_key("stores_view", "selected_store"))
+    selected_id = selected.split(" | ", 1)[0]
+    current = stores[stores["Store ID"].astype(str).eq(selected_id)].iloc[0]
+    with st.form(widget_key("stores_view", "edit_form", selected_id)):
+        name = st.text_input("Store Name", value=str(current["Store Name"]), key=widget_key("stores_view", "edit_name", selected_id))
+        location = st.text_input("Location", value=str(current["Location"]), key=widget_key("stores_view", "edit_location", selected_id))
+        contact = st.text_input("Contact Person", value=str(current["Contact Person"]), key=widget_key("stores_view", "edit_contact", selected_id))
+        phone = st.text_input("Phone", value=str(current["Phone"]), key=widget_key("stores_view", "edit_phone", selected_id))
+        notes = st.text_area("Notes", value=str(current["Notes"]), key=widget_key("stores_view", "edit_notes", selected_id))
+        active = st.checkbox("Active", value=str(current["Active"]).upper() == "YES", key=widget_key("stores_view", "edit_active", selected_id))
+        if st.form_submit_button("Save Store", key=widget_key("stores_view", "save", selected_id)):
+            try:
+                store_manager.update_store(selected_id, name, location, contact, phone, notes, active)
+                if selected_id == active_store_id():
+                    st.session_state["active_store_name"] = name
+                st.success("Store updated.")
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
+    col_a, col_b, col_c = st.columns(3)
+    if col_a.button("Switch to Selected Store", key=widget_key("stores_view", "switch", selected_id)):
+        switch_active_store(selected_id)
+        st.rerun()
+    if col_b.button("Deactivate Store", key=widget_key("stores_view", "deactivate", selected_id)):
+        current_active_store = st.session_state.get("active_store_id") or active_store_id()
+        was_active = selected_id == current_active_store
+        store_manager.deactivate_store(selected_id)
+        if was_active:
+            clear_active_result_state()
+            st.session_state.pop("active_store_id", None)
+            ensure_active_store()
+        st.success("Store deactivated.")
+        st.rerun()
+    if col_c.button("Reactivate Store", key=widget_key("stores_view", "reactivate", selected_id)):
+        store_manager.reactivate_store(selected_id)
+        st.success("Store reactivated.")
+        st.rerun()
+
+
+def render_add_store_page() -> None:
+    st.title("Add Store")
+    with st.form(widget_key("stores_add", "form")):
+        name = st.text_input("Store Name", key=widget_key("stores_add", "name"))
+        location = st.text_input("Location", key=widget_key("stores_add", "location"))
+        contact = st.text_input("Contact Person", key=widget_key("stores_add", "contact"))
+        phone = st.text_input("Phone", key=widget_key("stores_add", "phone"))
+        notes = st.text_area("Notes", key=widget_key("stores_add", "notes"))
+        make_active = st.checkbox("Switch to this store after adding", value=True, key=widget_key("stores_add", "make_active"))
+        if st.form_submit_button("Add Store", key=widget_key("stores_add", "save")):
+            try:
+                store_id = store_manager.add_store(name, location, contact, phone, notes)
+                file_manager.ensure_store_dirs(store_id)
+                mdm.ensure_store_master_files(store_id)
+                result_store.ensure_result_dirs(store_id)
+                if make_active:
+                    switch_active_store(store_id)
+                st.success(f"Added store {store_id}.")
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
+
+
+def render_store_data_status_page() -> None:
+    st.title("Store Data Status")
+    store_caption()
+    store_id = active_store_id()
+    status = file_manager.get_store_data_status(store_id)
+    st.subheader("Stock")
+    stock_rows = [
+        {
+            "Available": Path(row["Path"]).exists(),
+            "Last Modified": modified_text(Path(row["Path"])),
+            "Path": str(row["Path"]),
+        }
+        for row in status["stock_files"]
+    ]
+    st.dataframe(pd.DataFrame(stock_rows or [{"Available": False, "Last Modified": "Not available", "Path": str(status["stock_path"])}]), hide_index=True, use_container_width=True)
+    st.subheader("Sales Files")
+    sales_rows = [
+        {
+            "FY": row["FY"],
+            "Available": Path(row["Path"]).exists(),
+            "Last Modified": modified_text(Path(row["Path"])),
+            "Path": str(row["Path"]),
+        }
+        for row in status["sales_files"]
+    ]
+    st.dataframe(pd.DataFrame(sales_rows), hide_index=True, use_container_width=True)
+    st.subheader("Latest Result")
+    st.dataframe(
+        pd.DataFrame(
+            [
+                {
+                    "Exists": status["latest_result_exists"],
+                    "Run ID": status["latest_run_id"],
+                    "Created At": status["latest_created_at"],
+                    "Path": str(result_store.latest_dir(store_id)),
+                }
+            ]
+        ),
+        hide_index=True,
+        use_container_width=True,
+    )
+    st.subheader("Store Master Files")
+    rows = []
+    for name, path in {
+        "discontinued-items.csv": mdm.discontinued_path(store_id),
+        "item-suppliers.csv": mdm.item_suppliers_path(store_id),
+        "item-categories.csv": mdm.item_categories_path(store_id),
+    }.items():
+        rows.append({"File": name, "Available": path.exists(), "Last Modified": modified_text(path), "Path": str(path)})
+    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
 
 
 def render_debug_item_velocity_page(report: dict | None) -> None:
@@ -1736,7 +2033,7 @@ def render_debug_item_velocity_page(report: dict | None) -> None:
         st.dataframe(df, use_container_width=True, hide_index=True)
 
 
-stock_path = file_manager.get_stock_file_path()
+stock_path = file_manager.get_stock_file_path(active_store_id())
 sales_paths = current_sales_paths()
 settings = current_settings()
 sales_mappings = {}
@@ -1747,6 +2044,10 @@ NAV_ITEMS = {
     "Dashboard": {
         "icon": "📊",
         "pages": ["Executive Summary", "Business Recommendations"],
+    },
+    "Stores": {
+        "icon": "ST",
+        "pages": ["View Stores", "Add Store", "Store Data Status"],
     },
     "Item-wise Sales": {
         "icon": "🧾",
@@ -1797,8 +2098,53 @@ def inject_ui_css() -> None:
     st.markdown(
         """
         <style>
+        .stApp,
+        [data-testid="stAppViewContainer"],
+        [data-testid="stAppViewContainer"] > .main,
+        [data-testid="stHeader"],
+        [data-testid="stToolbar"],
+        [data-testid="stDecoration"],
+        .main .block-container {
+            background: #ffffff !important;
+            color: #0f172a !important;
+        }
+        [data-testid="stHeader"] {
+            border-bottom: 1px solid #e5e7eb;
+        }
+        h1, h2, h3, h4, h5, h6, p, label, span, div {
+            color: inherit;
+        }
+        div[data-testid="stMetric"],
+        div[data-testid="stDataFrame"],
+        div[data-testid="stExpander"],
+        div[data-testid="stForm"],
+        div[data-testid="stAlert"] {
+            background: #ffffff !important;
+            color: #0f172a !important;
+        }
+        div[data-baseweb="select"] > div,
+        div[data-baseweb="input"] input,
+        textarea,
+        input {
+            background: #ffffff !important;
+            color: #0f172a !important;
+            border-color: #d1d5db !important;
+        }
+        button {
+            background: #ffffff;
+            color: #0f172a;
+        }
+        div[data-testid="stButton"] > button[kind="primary"] {
+            background: #2563eb !important;
+            border-color: #2563eb !important;
+            color: #ffffff !important;
+        }
+        div[data-testid="stButton"] > button[kind="primary"] p {
+            color: #ffffff !important;
+        }
         section[data-testid="stSidebar"] {
-            background: #f8fafc;
+            background: #f8fafc !important;
+            color: #0f172a !important;
             border-right: 1px solid #e2e8f0;
         }
         section[data-testid="stSidebar"] hr {
@@ -1943,26 +2289,24 @@ def set_active_route(menu_name: str, page_name: str | None = None) -> None:
 
 
 def load_latest_result_into_state() -> bool:
-    loaded = result_store.load_latest_result()
+    store_id = active_store_id()
+    loaded = result_store.load_latest_result(store_id)
     if not loaded:
         return False
-    st.session_state["report"] = loaded["report"]
-    st.session_state["active_run_id"] = loaded["manifest"].get("run_id", "")
-    st.session_state["active_result_source"] = "latest"
-    st.session_state["active_manifest"] = loaded["manifest"]
-    st.session_state["active_result_path"] = str(loaded["path"])
-    st.session_state["export_path"] = loaded["excel_path"]
+    set_active_result_state(loaded, "latest", store_id)
     return True
 
 
 def render_sidebar_status_card(active_manifest: dict | None) -> None:
-    stock_status = "Available" if stock_path else "Missing"
-    sales_count = len(file_manager.list_available_sales_years())
+    store_id, store_name = ensure_active_store()
+    stock_status = "Available" if file_manager.get_stock_file_path(store_id) else "Missing"
+    sales_count = len(file_manager.list_available_sales_years(store_id))
     run_id = active_manifest.get("run_id", "No result") if active_manifest else "No result"
     latest_time = active_manifest.get("created_at_display", "-") if active_manifest else "-"
     st.sidebar.markdown(
         f"""
         <div class="sidebar-status-card">
+            <div><b>Store:</b><br>{store_name}</div>
             <div><b>Stock:</b> {stock_status}</div>
             <div><b>Sales FYs:</b> {sales_count}</div>
             <div><b>Active Result:</b><br>{run_id}</div>
@@ -1984,6 +2328,26 @@ def render_sidebar() -> tuple[str, str]:
 
     st.sidebar.markdown('<div class="sidebar-title">Inventory PO Planner</div>', unsafe_allow_html=True)
     st.sidebar.markdown('<div class="sidebar-subtitle">Purchase Manager Dashboard</div>', unsafe_allow_html=True)
+    store_id, _ = ensure_active_store()
+    stores = store_manager.load_stores(active_only=True)
+    if stores.empty:
+        st.sidebar.warning("No active stores found. Add or reactivate a store.")
+    else:
+        labels = [f"{r['Store ID']} | {r['Store Name']}" for _, r in stores.iterrows()]
+        current_label = next((label for label in labels if label.startswith(f"{store_id} |")), labels[0])
+        choice = st.sidebar.selectbox(
+            "Store",
+            labels,
+            index=labels.index(current_label),
+            key=widget_key("sidebar", "store_selector"),
+        )
+        selected_store_id = choice.split(" | ", 1)[0]
+        if selected_store_id != store_id:
+            switch_active_store(selected_store_id)
+            st.rerun()
+    if st.sidebar.button("Manage Stores", key=widget_key("sidebar", "manage_stores"), use_container_width=True):
+        set_active_route("Stores", "View Stores")
+        st.rerun()
     render_sidebar_status_card(st.session_state.get("active_manifest", {}))
 
     st.sidebar.markdown('<div class="sidebar-section-label">Quick Actions</div>', unsafe_allow_html=True)
@@ -2045,6 +2409,12 @@ if main_section == "Dashboard" and page == "Executive Summary":
     render_dashboard_summary(report)
 elif main_section == "Dashboard" and page == "Business Recommendations":
     render_business_recommendations_page(report)
+elif main_section == "Stores" and page == "View Stores":
+    render_stores_view_page()
+elif main_section == "Stores" and page == "Add Store":
+    render_add_store_page()
+elif main_section == "Stores" and page == "Store Data Status":
+    render_store_data_status_page()
 elif main_section == "Item-wise Sales" and page == "View Sales":
     render_sales_view_page()
 elif main_section == "Item-wise Sales" and page == "Upload Sales":

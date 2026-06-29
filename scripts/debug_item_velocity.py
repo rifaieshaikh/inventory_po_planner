@@ -9,6 +9,7 @@ sys.path.insert(0, str(ROOT))
 import pandas as pd
 
 from src import file_manager
+from src import store_manager
 from src.data_loader import load_sales_files, load_stock_file
 from src.debug_tools import item_debug_report
 from src.po_calculator import calculate_po
@@ -23,8 +24,10 @@ def main() -> int:
         print('Usage: python scripts/debug_item_velocity.py "VB-1114 MAT (0.45MMX22MM)"')
         return 1
 
-    sales_paths = file_manager.get_sales_file_paths()
-    stock_path = file_manager.get_stock_file_path()
+    store_id = store_manager.create_default_store_if_missing()
+    file_manager.migrate_single_store_data_to_default_store()
+    sales_paths = file_manager.get_sales_file_paths(store_id)
+    stock_path = file_manager.get_stock_file_path(store_id)
     if not stock_path or not sales_paths:
         print("Missing stock file or sales files.")
         return 1

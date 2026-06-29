@@ -14,6 +14,7 @@ streamlit run app.py
 
 - Streamlit page config.
 - Directory initialization.
+- Store initialization and default-store migration.
 - Master-data initialization.
 - Result-history initialization.
 - Session-state report loading.
@@ -26,7 +27,8 @@ streamlit run app.py
 | File | Key Functions | Notes |
 | --- | --- | --- |
 | `src/utils.py` | `normalize_text`, `build_item_key`, `safe_divide`, `ceil_to_multiple`, `ensure_required_output_columns` | Shared paths, sort orders, defaults |
-| `src/file_manager.py` | `ensure_data_dirs`, `save_sales_file`, `save_stock_file`, `list_available_sales_years`, `get_sales_file_paths`, `get_stock_file_path` | Filesystem contract for uploads |
+| `src/store_manager.py` | `create_default_store_if_missing`, `add_store`, `update_store`, `deactivate_store`, `reactivate_store` | Store master, IDs, folders, `store.json` |
+| `src/file_manager.py` | `ensure_store_dirs`, `save_sales_file`, `save_stock_file`, `list_available_sales_years`, `get_sales_file_paths`, `get_stock_file_path`, `migrate_single_store_data_to_default_store` | Store-aware filesystem contract for uploads and migration |
 | `src/column_mapper.py` | `detect_columns`, `missing_required`, `validate_sales_quantity_column`, `quantity_candidate_columns` | Source CSV field detection |
 | `src/cleaner.py` | `clean_sales`, `clean_stock`, `choose_sales_quantity_column` | Raw-to-normalized dataframe conversion |
 | `src/data_loader.py` | `read_csv_flexible`, `load_sales_files`, `load_stock_file` | CSV reading with encoding fallback |
@@ -48,8 +50,9 @@ streamlit run app.py
 `build_report` in `app.py` is the central flow:
 
 ```text
-load_stock_file
-load_sales_files
+active store selection
+store-specific load_stock_file
+store-specific load_sales_files
 validate_data
 analyze_sales
 analyze_trends
@@ -76,6 +79,9 @@ Important session keys:
 | Key | Meaning |
 | --- | --- |
 | `report` | Active report dictionary |
+| `report_store_id` | Store ID for the active report |
+| `active_store_id` | Selected store ID |
+| `active_store_name` | Selected store name |
 | `active_run_id` | Active run ID |
 | `active_result_source` | `latest`, `new_run`, or loaded history source |
 | `active_manifest` | Manifest for active result |
@@ -123,7 +129,7 @@ Most widget keys are built through `widget_key(section, name, suffix)` to avoid 
 
 ## Master Data Rules
 
-Master files should be treated as persistent user-managed state. Avoid replacing or regenerating them during analysis except for intentional behavior already present in `master_data_manager.py`, such as:
+Master files should be treated as persistent user-managed state. Global suppliers/categories/stores live under `data/master/`. Store-specific discontinued, item-supplier, and item-category mappings live under `data/stores/{STORE_ID}/master/`. Avoid replacing or regenerating them during analysis except for intentional behavior already present in `master_data_manager.py`, such as:
 
 - Ensuring the `Uncategorized` category exists.
 - Adding missing uncategorized item-category rows during enrichment.
@@ -133,14 +139,14 @@ When editing master-data behavior, preserve user changes and avoid destructive r
 
 ## Result Storage Rules
 
-`save_analysis_result` writes a new run directory and then copies that directory to `latest`.
+`save_analysis_result(store_id, ...)` writes each run under `data/runs/{STORE_ID}/{RUN_ID}/`. The run root contains the stock snapshot, the included item-wise sales files by FY, and a `result/` directory with generated CSV, text, manifest, and Excel files. The generated result files are also copied to `data/runs/{STORE_ID}/latest/result/`.
 
 Historical run IDs are validated before load/delete/copy:
 
 - Must start with `RUN-`.
 - Must not contain `/`, `\`, or `..`.
 
-Deletion resolves paths under `HISTORY_DIR` before removing them.
+Deletion resolves paths under the selected store's history directory before removing them.
 
 ## Debugging
 
@@ -176,13 +182,13 @@ The script prints:
 Saved run folders are under:
 
 ```text
-data/results/history/
+data/runs/{STORE_ID}/{RUN_ID}/
 ```
 
-Each run has a `manifest.json`. The current active latest run is copied to:
+Each run has a `result/manifest.json`. The current active latest result is copied to:
 
 ```text
-data/results/latest/
+data/runs/{STORE_ID}/latest/result/
 ```
 
 ## Known Caveats
@@ -201,6 +207,6 @@ Before handing off changes:
 1. Run `python -m compileall app.py src scripts`.
 2. If analysis logic changed, run the Streamlit app and create a new analysis result from the UI.
 3. Inspect Data Validation and Velocity Calculation Warnings.
-4. Check `data/results/latest/manifest.json`.
+4. Check `data/runs/{STORE_ID}/latest/result/manifest.json`.
 5. Download or regenerate the Excel workbook from Reports / Excel Export.
 6. Update documentation when behavior or file contracts change.

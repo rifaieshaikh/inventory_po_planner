@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 
 import pandas as pd
 
+from . import store_manager
 from .utils import MASTER_DIR, build_item_key, normalize_text
 
 
@@ -40,22 +42,41 @@ def ensure_master_dirs() -> None:
 
 
 def _ensure_csv(path, columns: list[str]) -> None:
-    ensure_master_dirs()
+    path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists() or path.stat().st_size == 0:
         pd.DataFrame(columns=columns).to_csv(path, index=False)
 
 
 def ensure_master_files() -> None:
-    _ensure_csv(DISCONTINUED_PATH, DISCONTINUED_COLUMNS)
-    _ensure_csv(ITEM_SUPPLIERS_PATH, ITEM_SUPPLIER_COLUMNS)
     ensure_category_files()
     _ensure_csv(SUPPLIERS_PATH, SUPPLIER_COLUMNS)
 
 
 def ensure_category_files() -> None:
     _ensure_csv(CATEGORIES_PATH, CATEGORY_COLUMNS)
-    _ensure_csv(ITEM_CATEGORIES_PATH, ITEM_CATEGORY_COLUMNS)
     ensure_uncategorized_category_exists()
+
+
+def _store_master_dir(store_id: str) -> Path:
+    return store_manager.get_store_folder(store_id) / "master"
+
+
+def discontinued_path(store_id: str) -> Path:
+    return _store_master_dir(store_id) / "discontinued-items.csv"
+
+
+def item_suppliers_path(store_id: str) -> Path:
+    return _store_master_dir(store_id) / "item-suppliers.csv"
+
+
+def item_categories_path(store_id: str) -> Path:
+    return _store_master_dir(store_id) / "item-categories.csv"
+
+
+def ensure_store_master_files(store_id: str) -> None:
+    _ensure_csv(discontinued_path(store_id), DISCONTINUED_COLUMNS)
+    _ensure_csv(item_suppliers_path(store_id), ITEM_SUPPLIER_COLUMNS)
+    _ensure_csv(item_categories_path(store_id), ITEM_CATEGORY_COLUMNS)
 
 
 def _read_csv(path, columns: list[str]) -> pd.DataFrame:
@@ -72,21 +93,22 @@ def _read_csv(path, columns: list[str]) -> pd.DataFrame:
     return df[columns].copy()
 
 
-def load_discontinued_items() -> pd.DataFrame:
-    return _read_csv(DISCONTINUED_PATH, DISCONTINUED_COLUMNS)
+def load_discontinued_items(store_id: str) -> pd.DataFrame:
+    ensure_store_master_files(store_id)
+    return _read_csv(discontinued_path(store_id), DISCONTINUED_COLUMNS)
 
 
-def save_discontinued_items(df: pd.DataFrame) -> None:
-    ensure_master_dirs()
+def save_discontinued_items(store_id: str, df: pd.DataFrame) -> None:
+    ensure_store_master_files(store_id)
     out = df.copy()
     for col in DISCONTINUED_COLUMNS:
         if col not in out.columns:
             out[col] = ""
-    out[DISCONTINUED_COLUMNS].to_csv(DISCONTINUED_PATH, index=False)
+    out[DISCONTINUED_COLUMNS].to_csv(discontinued_path(store_id), index=False)
 
 
-def set_discontinued_item(item_key: str, item_code: str, item_name: str, discontinued: bool, reason: str = "") -> None:
-    df = load_discontinued_items()
+def set_discontinued_item(store_id: str, item_key: str, item_code: str, item_name: str, discontinued: bool, reason: str = "") -> None:
+    df = load_discontinued_items(store_id)
     item_key = normalize_text(item_key)
     mask = df["Item Key"].map(normalize_text).eq(item_key)
     row = {
@@ -103,24 +125,25 @@ def set_discontinued_item(item_key: str, item_code: str, item_name: str, discont
             df.loc[mask, col] = value
     else:
         df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
-    save_discontinued_items(df)
+    save_discontinued_items(store_id, df)
 
 
-def load_item_suppliers() -> pd.DataFrame:
-    return _read_csv(ITEM_SUPPLIERS_PATH, ITEM_SUPPLIER_COLUMNS)
+def load_item_suppliers(store_id: str) -> pd.DataFrame:
+    ensure_store_master_files(store_id)
+    return _read_csv(item_suppliers_path(store_id), ITEM_SUPPLIER_COLUMNS)
 
 
-def save_item_suppliers(df: pd.DataFrame) -> None:
-    ensure_master_dirs()
+def save_item_suppliers(store_id: str, df: pd.DataFrame) -> None:
+    ensure_store_master_files(store_id)
     out = df.copy()
     for col in ITEM_SUPPLIER_COLUMNS:
         if col not in out.columns:
             out[col] = ""
-    out[ITEM_SUPPLIER_COLUMNS].to_csv(ITEM_SUPPLIERS_PATH, index=False)
+    out[ITEM_SUPPLIER_COLUMNS].to_csv(item_suppliers_path(store_id), index=False)
 
 
-def set_item_supplier(item_key: str, item_code: str, item_name: str, supplier_id: str, supplier_name: str) -> None:
-    df = load_item_suppliers()
+def set_item_supplier(store_id: str, item_key: str, item_code: str, item_name: str, supplier_id: str, supplier_name: str) -> None:
+    df = load_item_suppliers(store_id)
     item_key = normalize_text(item_key)
     mask = df["Item Key"].map(normalize_text).eq(item_key)
     row = {
@@ -136,7 +159,7 @@ def set_item_supplier(item_key: str, item_code: str, item_name: str, supplier_id
             df.loc[mask, col] = value
     else:
         df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
-    save_item_suppliers(df)
+    save_item_suppliers(store_id, df)
 
 
 def load_categories(active_only: bool = False) -> pd.DataFrame:
@@ -181,11 +204,16 @@ def ensure_uncategorized_category_exists() -> dict:
     now = _now()
     if mask.any():
         idx = categories[mask].index[0]
-        categories.loc[idx, "Active"] = "Yes"
+        changed = False
+        if str(categories.loc[idx, "Active"]).strip().upper() != "YES":
+            categories.loc[idx, "Active"] = "Yes"
+            changed = True
         if not str(categories.loc[idx, "Box Qty"]).strip():
             categories.loc[idx, "Box Qty"] = 0
-        categories.loc[idx, "Updated At"] = now
-        save_categories(categories)
+            changed = True
+        if changed:
+            categories.loc[idx, "Updated At"] = now
+            save_categories(categories)
         row = categories.loc[idx].to_dict()
         return row
     category_id = get_next_category_id()
@@ -260,21 +288,22 @@ def reactivate_category(category_id: str) -> None:
     save_categories(df)
 
 
-def load_item_categories() -> pd.DataFrame:
-    return _read_csv(ITEM_CATEGORIES_PATH, ITEM_CATEGORY_COLUMNS)
+def load_item_categories(store_id: str) -> pd.DataFrame:
+    ensure_store_master_files(store_id)
+    return _read_csv(item_categories_path(store_id), ITEM_CATEGORY_COLUMNS)
 
 
-def save_item_categories(df: pd.DataFrame) -> None:
-    ensure_master_dirs()
+def save_item_categories(store_id: str, df: pd.DataFrame) -> None:
+    ensure_store_master_files(store_id)
     out = df.copy()
     for col in ITEM_CATEGORY_COLUMNS:
         if col not in out.columns:
             out[col] = ""
-    out[ITEM_CATEGORY_COLUMNS].to_csv(ITEM_CATEGORIES_PATH, index=False)
+    out[ITEM_CATEGORY_COLUMNS].to_csv(item_categories_path(store_id), index=False)
 
 
-def set_item_category(item_key: str, item_code: str, item_name: str, category_id: str, category_name: str) -> None:
-    df = load_item_categories()
+def set_item_category(store_id: str, item_key: str, item_code: str, item_name: str, category_id: str, category_name: str) -> None:
+    df = load_item_categories(store_id)
     item_key = normalize_text(item_key)
     mask = df["Item Key"].map(normalize_text).eq(item_key)
     row = {
@@ -290,14 +319,14 @@ def set_item_category(item_key: str, item_code: str, item_name: str, category_id
             df.loc[mask, col] = value
     else:
         df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
-    save_item_categories(df)
+    save_item_categories(store_id, df)
 
 
-def clear_item_category(item_key: str) -> None:
-    df = load_item_categories()
+def clear_item_category(store_id: str, item_key: str) -> None:
+    df = load_item_categories(store_id)
     item_key = normalize_text(item_key)
     df = df[~df["Item Key"].map(normalize_text).eq(item_key)].copy()
-    save_item_categories(df)
+    save_item_categories(store_id, df)
 
 
 def load_suppliers(active_only: bool = False) -> pd.DataFrame:
@@ -409,7 +438,8 @@ def reactivate_supplier(supplier_id: str) -> None:
     save_suppliers(df)
 
 
-def enrich_with_master_data(detail: pd.DataFrame) -> pd.DataFrame:
+def enrich_with_master_data(detail: pd.DataFrame, store_id: str) -> pd.DataFrame:
+    ensure_store_master_files(store_id)
     result = detail.copy()
     if "Item Key" not in result.columns:
         result["Item Key"] = result.apply(build_item_key, axis=1)
@@ -432,7 +462,7 @@ def enrich_with_master_data(detail: pd.DataFrame) -> pd.DataFrame:
         qty = pd.to_numeric(value, errors="coerce")
         return float(qty) if pd.notna(qty) else 0.0
 
-    item_categories = load_item_categories()
+    item_categories = load_item_categories(store_id)
     if not item_categories.empty:
         item_categories["Item Key"] = item_categories["Item Key"].map(normalize_text)
         item_categories = item_categories.drop_duplicates("Item Key", keep="last")
@@ -488,7 +518,7 @@ def enrich_with_master_data(detail: pd.DataFrame) -> pd.DataFrame:
         )
 
     if uncategorized_updates:
-        existing = load_item_categories()
+        existing = load_item_categories(store_id)
         for item_key, item_code, item_name in uncategorized_updates:
             if not existing.empty and existing["Item Key"].map(normalize_text).eq(normalize_text(item_key)).any():
                 continue
@@ -510,7 +540,7 @@ def enrich_with_master_data(detail: pd.DataFrame) -> pd.DataFrame:
                 ],
                 ignore_index=True,
             )
-        save_item_categories(existing)
+        save_item_categories(store_id, existing)
 
     category_df = pd.DataFrame(resolved_category_rows).reset_index(drop=True)
     result = result.reset_index(drop=True)
@@ -522,7 +552,7 @@ def enrich_with_master_data(detail: pd.DataFrame) -> pd.DataFrame:
     result["Category Source"] = result["Category Source"].fillna("Uncategorized")
     result["Box Qty Source"] = result["Box Qty Source"].fillna("Not Available")
 
-    discontinued = load_discontinued_items()
+    discontinued = load_discontinued_items(store_id)
     disc_active = discontinued[discontinued["Discontinued"].astype(str).str.upper().eq("YES")].copy()
     disc_active["Item Key"] = disc_active["Item Key"].map(normalize_text)
     disc_cols = disc_active[["Item Key", "Discontinued Date", "Reason"]].rename(columns={"Reason": "Discontinued Reason"})
@@ -531,7 +561,7 @@ def enrich_with_master_data(detail: pd.DataFrame) -> pd.DataFrame:
     result["Discontinued Date"] = result["Discontinued Date"].fillna("")
     result["Discontinued Reason"] = result["Discontinued Reason"].fillna("")
 
-    mappings = load_item_suppliers()
+    mappings = load_item_suppliers(store_id)
     mappings["Item Key"] = mappings["Item Key"].map(normalize_text)
     mappings = mappings.drop_duplicates("Item Key", keep="last")
     map_cols = mappings[["Item Key", "Supplier ID", "Supplier Name"]].rename(
@@ -553,12 +583,13 @@ def enrich_with_master_data(detail: pd.DataFrame) -> pd.DataFrame:
     return result.drop(columns=["Mapped Supplier ID", "Mapped Supplier Name"], errors="ignore")
 
 
-def master_validation_warnings(detail: pd.DataFrame, final_po: pd.DataFrame) -> pd.DataFrame:
+def master_validation_warnings(detail: pd.DataFrame, final_po: pd.DataFrame, store_id: str) -> pd.DataFrame:
+    ensure_store_master_files(store_id)
     issues = []
     suppliers = load_suppliers()
-    mappings = load_item_suppliers()
+    mappings = load_item_suppliers(store_id)
     categories = load_categories()
-    item_categories = load_item_categories()
+    item_categories = load_item_categories(store_id)
     supplier_active = suppliers.set_index("Supplier ID")["Active"].to_dict() if not suppliers.empty else {}
     category_active = categories.set_index("Category ID")["Active"].to_dict() if not categories.empty and "Category ID" in categories.columns else {}
     current_keys = set(detail.get("Item Key", pd.Series(dtype=str)).map(normalize_text))
