@@ -1,0 +1,18 @@
+Metric,Value
+Total items analyzed,270
+Very Fast Moving items,25
+Fast Moving items,34
+Medium Moving items,56
+Slow Moving items,48
+Dormant items,91
+Dead stock items,16
+Items recommended for purchase,10
+Urgent PO items,0
+High PO items,3
+Total PO value,104723.15
+PO value by priority,"{'High': 13824.92, 'Medium': 41542.33, 'No Purchase': 49355.9}"
+Potential overstock value,5086483.0
+Items skipped due to overstock risk,2
+Items deferred due to budget,2
+Overall stock health,Cash protected by skipping overstock lines
+Key risks,16 dead/no-sales items should not be reordered. 3 high-priority items are below target coverage.

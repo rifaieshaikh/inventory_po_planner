@@ -1,0 +1,10 @@
+Assumption	Detail
+Planning metric	Purchase planning is based on quantity, not sales amount.
+Missing item code	Normalized item name is used as SKU when item code is unavailable.
+Missing stock	Missing stock is treated as 0.
+Missing purchase price	Missing purchase price is treated as 0 and flagged.
+Missing supplier	Missing supplier is treated as Unknown Supplier.
+Box rounding	Final PO quantity is rounded up to box/MOQ where available and enabled.
+Dynamic cover	Very fast/fast items get higher cover; medium and slow items get lower cover.
+Dormant and dead stock	Dormant/dead items are not reordered when exclusion is enabled.
+Budget optimization	Budget approval columns are added when budget optimization is enabled.
