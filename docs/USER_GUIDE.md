@@ -24,7 +24,7 @@ The app can work from files already saved in the selected FY/store input folders
 
 ### Store Selection
 
-Use the sidebar store selector to choose the active store. Store-specific pages only read and write files for the selected store. Use Stores / View Stores to edit, deactivate, reactivate, or switch stores, and Stores / Add Store to create another branch.
+Use the sidebar store selector to choose the active store. Store-specific pages only read and write files for the selected store. Use Stores / Manage Stores to add, edit, deactivate, reactivate, or switch stores.
 
 ### Stock File
 

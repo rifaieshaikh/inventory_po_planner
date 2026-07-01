@@ -10,7 +10,7 @@ import pandas as pd
 from . import store_manager
 from .excel_exporter import export_excel
 from .file_manager import SALES_FILENAME, STOCK_FILENAME, get_sales_year_from_path
-from .utils import DATA_DIR, RUNS_DIR
+from .utils import DATA_DIR, RUNS_DIR, coerce_numeric_output_columns
 
 
 LEGACY_RESULTS_DIR = DATA_DIR / "results"
@@ -299,7 +299,7 @@ def _load_run_dir(run_dir: Path) -> dict | None:
         path = run_dir / filename
         if path.exists():
             try:
-                report[key] = pd.read_csv(path).fillna("")
+                report[key] = coerce_numeric_output_columns(pd.read_csv(path)).fillna("")
             except pd.errors.EmptyDataError:
                 report[key] = pd.DataFrame()
         else:

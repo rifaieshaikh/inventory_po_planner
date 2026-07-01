@@ -1,0 +1,18 @@
+{
+  "template_name": "VAY-STOCK",
+  "file_type": "stock",
+  "mapping": {
+    "Item Name": "Item Name",
+    "Current Stock Quantity": "Qty",
+    "Item Code / SKU": "Item Name",
+    "Category / Size / Type": null,
+    "Purchase Price": "P.Price",
+    "Supplier Name": null,
+    "Unit": null,
+    "Box Size / Pack Size / MOQ": null,
+    "Stock Value": "Amount",
+    "Location / Rack": null
+  },
+  "created_at": "2026-06-30T00:34:22+05:30",
+  "updated_at": "2026-06-30T00:34:43+05:30"
+}

@@ -1,14 +1,31 @@
 from __future__ import annotations
 
+import json
 import math
+import re
 import time
+from datetime import datetime
+from io import BytesIO
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
 from src import file_manager
-from src.column_mapper import detect_columns, missing_required, validate_sales_quantity_column
+from src.column_mapper import (
+    apply_mapping,
+    detect_column_mapping,
+    detect_columns,
+    get_field_specs,
+    has_blocking_errors,
+    load_mapping,
+    missing_required,
+    normalize_mapping,
+    save_mapping,
+    to_number,
+    validate_mapping,
+    validate_sales_quantity_column,
+)
 from src.data_loader import load_sales_files, load_stock_file, read_csv_flexible
 from src.debug_tools import item_debug_report
 from src.excel_exporter import export_excel
@@ -27,6 +44,10 @@ from src.validator import validate_data, validate_velocity_calculations
 
 
 st.set_page_config(page_title="Inventory PO Planner", layout="wide")
+APP_STATE_VERSION = "py314-streamlit-1.58-store-dialogs"
+if st.session_state.get("_app_state_version") != APP_STATE_VERSION:
+    st.session_state.clear()
+    st.session_state["_app_state_version"] = APP_STATE_VERSION
 file_manager.ensure_data_dirs()
 store_manager.ensure_store_master_file()
 DEFAULT_ACTIVE_STORE_ID = store_manager.create_default_store_if_missing()
@@ -254,6 +275,487 @@ def mapping_editor(path: Path, data_type: str, key_prefix: str) -> dict[str, str
         return mapping
 
 
+def relative_app_path(path: Path | str | None) -> str:
+    if not path:
+        return ""
+    try:
+        return str(Path(path).resolve().relative_to(Path(__file__).resolve().parent))
+    except ValueError:
+        return str(path)
+
+
+def clean_uploaded_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    result = df.copy()
+    result.columns = [str(col).strip().lstrip("\ufeff") for col in result.columns]
+    return result.dropna(how="all")
+
+
+def read_uploaded_csv(data: bytes) -> pd.DataFrame:
+    encodings = ["utf-8", "utf-8-sig", "latin1"]
+    attempts: list[pd.DataFrame] = []
+    last_error: Exception | None = None
+    for encoding in encodings:
+        for kwargs in [{"sep": ","}, {"sep": "\t"}, {"sep": None, "engine": "python"}]:
+            try:
+                attempts.append(pd.read_csv(BytesIO(data), encoding=encoding, **kwargs))
+            except Exception as exc:
+                last_error = exc
+    if attempts:
+        return clean_uploaded_dataframe(max(attempts, key=lambda frame: len(frame.columns)))
+    if last_error:
+        raise last_error
+    raise ValueError("Could not read uploaded CSV.")
+
+
+def read_uploaded_table(uploaded_file, section_prefix: str) -> tuple[pd.DataFrame | None, str | None, list[str]]:
+    warnings: list[str] = []
+    if uploaded_file is None:
+        return None, None, warnings
+    data = uploaded_file.getvalue()
+    suffix = Path(uploaded_file.name).suffix.lower()
+    if suffix in {".xlsx", ".xls"}:
+        try:
+            workbook = pd.ExcelFile(BytesIO(data))
+        except Exception as exc:
+            st.error(f"Could not read Excel workbook: {exc}")
+            return None, None, warnings
+        if not workbook.sheet_names:
+            st.warning("Excel workbook has no sheets.")
+            return None, None, warnings
+        st.caption("Sheets: " + ", ".join(workbook.sheet_names))
+        sheet_name = st.selectbox("Sheet", workbook.sheet_names, key=widget_key(section_prefix, "sheet"))
+        try:
+            df = pd.read_excel(BytesIO(data), sheet_name=sheet_name)
+        except Exception as exc:
+            st.error(f"Could not read selected sheet: {exc}")
+            return None, sheet_name, warnings
+        df = clean_uploaded_dataframe(df)
+        if df.empty:
+            warnings.append("Selected sheet is empty.")
+        return df, sheet_name, warnings
+    try:
+        df = read_uploaded_csv(data)
+    except Exception as exc:
+        st.error(f"Could not read CSV file: {exc}")
+        return None, None, warnings
+    if df.empty:
+        warnings.append("Uploaded file is empty.")
+    return df, None, warnings
+
+
+def mapping_widget_name(field: str) -> str:
+    names = {
+        "Item Name": "map_item_name",
+        "Sales Quantity": "map_sales_qty",
+        "Current Stock Quantity": "map_stock_qty",
+        "Item Code / SKU": "map_item_code",
+        "Sales Date": "map_sales_date",
+        "Sales Month": "map_sales_month",
+        "Category / Size / Type": "map_category",
+        "Selling Price": "map_selling_price",
+        "Sales Amount": "map_sales_amount",
+        "Invoice Number": "map_invoice_number",
+        "Customer Name": "map_customer_name",
+        "Supplier Name": "map_supplier",
+        "Purchase Price": "map_purchase_price",
+        "Unit": "map_unit",
+        "Box Size / Pack Size / MOQ": "map_pack_size",
+        "Stock Value": "map_stock_value",
+        "Location / Rack": "map_location",
+    }
+    return names.get(field, "map_" + re.sub(r"[^a-z0-9]+", "_", field.lower()).strip("_"))
+
+
+def mapping_table(mapping: dict | None) -> pd.DataFrame:
+    normalized = mapping or {}
+    return pd.DataFrame(
+        [{"Logical Field": field, "Uploaded Column": column or "Not Available"} for field, column in normalized.items()]
+    )
+
+
+def template_file_name(template_name: str) -> str:
+    name = re.sub(r"[^A-Za-z0-9._ -]+", "_", str(template_name or "")).strip(" .")
+    if not name:
+        raise ValueError("Template name is required.")
+    return f"{name}.json"
+
+
+def list_mapping_templates(file_type: str) -> list[Path]:
+    template_dir = file_manager.get_mapping_template_dir(file_type)
+    template_dir.mkdir(parents=True, exist_ok=True)
+    return sorted(template_dir.glob("*.json"))
+
+
+def load_template_payload(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def render_mapping_template_loader(file_type: str, df: pd.DataFrame, section_prefix: str) -> dict | None:
+    templates = list_mapping_templates(file_type)
+    if not templates:
+        st.caption("No saved mapping templates yet.")
+        return None
+    labels = ["Do not load template"] + [path.stem for path in templates]
+    selected = st.selectbox("Load mapping template", labels, key=widget_key(section_prefix, "template_select"))
+    if selected == "Do not load template":
+        return None
+    template_path = next((path for path in templates if path.stem == selected), None)
+    if not template_path:
+        return None
+    payload = load_template_payload(template_path)
+    mapping = normalize_mapping(payload.get("mapping", {}), file_type)
+    missing = [column for column in mapping.values() if column and column not in df.columns]
+    if missing:
+        st.warning("Template columns missing in this upload: " + ", ".join(sorted(set(missing))))
+    return {field: (column if column in df.columns else None) for field, column in mapping.items()}
+
+
+def render_mapping_template_actions(file_type: str, mapping: dict, section_prefix: str) -> None:
+    st.markdown("**Mapping Templates**")
+    c1, c2 = st.columns([2, 1])
+    with c1:
+        template_name = st.text_input("Template name", key=widget_key(section_prefix, "template_name"))
+    with c2:
+        if st.button("Save Template", key=widget_key(section_prefix, "save_template")):
+            try:
+                now = datetime.now().astimezone().isoformat(timespec="seconds")
+                template_path = file_manager.get_mapping_template_dir(file_type) / template_file_name(template_name)
+                existing = load_template_payload(template_path)
+                payload = {
+                    "template_name": template_name.strip(),
+                    "file_type": "sales" if file_type == "sales" else "stock",
+                    "mapping": mapping,
+                    "created_at": existing.get("created_at", now),
+                    "updated_at": now,
+                }
+                template_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+                st.success(f"Saved template {template_path.stem}.")
+            except ValueError as exc:
+                st.error(str(exc))
+    templates = list_mapping_templates(file_type)
+    if templates:
+        delete_label = st.selectbox(
+            "Delete mapping template",
+            ["Choose template"] + [path.stem for path in templates],
+            key=widget_key(section_prefix, "delete_template_select"),
+        )
+        if st.button("Delete Template", key=widget_key(section_prefix, "delete_template")):
+            target = next((path for path in templates if path.stem == delete_label), None)
+            if target:
+                target.unlink(missing_ok=True)
+                st.success(f"Deleted template {delete_label}.")
+                st.rerun()
+
+
+def render_issues_table(issues: list[dict]) -> None:
+    if not issues:
+        st.success("Mapping validation passed.")
+        return
+    st.dataframe(
+        pd.DataFrame(issues, columns=["Severity", "Field", "Message", "Row Count", "Example Values"]),
+        hide_index=True,
+        width="stretch",
+    )
+    if has_blocking_errors(issues):
+        st.error("Fix mapping errors before saving.")
+    else:
+        st.warning("Warnings are present, but saving is allowed.")
+
+
+def render_column_mapping_step(
+    df: pd.DataFrame,
+    file_type: str,
+    existing_mapping: dict | None = None,
+    section_prefix: str = "",
+) -> dict:
+    st.subheader("Raw File Preview")
+    st.dataframe(df.head(20), hide_index=True, width="stretch")
+    st.caption("Uploaded columns: " + ", ".join([str(col) for col in df.columns]))
+
+    detected = detect_column_mapping(df, file_type)
+    mapping = detected.copy()
+    if existing_mapping:
+        mapping.update({field: column for field, column in normalize_mapping(existing_mapping, file_type).items() if column})
+
+    uploaded_columns = [str(col) for col in df.columns]
+    result: dict[str, str | None] = {}
+    required_specs = [spec for spec in get_field_specs(file_type) if spec["required"]]
+    optional_specs = [spec for spec in get_field_specs(file_type) if not spec["required"]]
+
+    st.subheader("Required Fields")
+    for spec in required_specs:
+        field = spec["field"]
+        options = ["Select column"] + uploaded_columns
+        current = mapping.get(field)
+        index = options.index(current) if current in options else 0
+        choice = st.selectbox(field, options, index=index, key=widget_key(section_prefix, mapping_widget_name(field)))
+        result[field] = None if choice == "Select column" else choice
+
+    st.subheader("Optional Fields")
+    for spec in optional_specs:
+        field = spec["field"]
+        options = ["Not Available"] + uploaded_columns
+        current = mapping.get(field)
+        index = options.index(current) if current in options else 0
+        choice = st.selectbox(field, options, index=index, key=widget_key(section_prefix, mapping_widget_name(field)))
+        result[field] = None if choice == "Not Available" else choice
+
+    issues = validate_mapping(df, result, file_type)
+    st.subheader("Validation Warnings / Errors")
+    render_issues_table(issues)
+    st.subheader("Cleaned Standardized Preview")
+    if has_blocking_errors(issues):
+        st.info("Cleaned preview will appear after required mapping errors are fixed.")
+    else:
+        try:
+            preview = apply_mapping(df, result, file_type, {"source_file_name": "preview"})
+            st.dataframe(preview.head(20), hide_index=True, width="stretch")
+        except Exception as exc:
+            st.warning(f"Could not build cleaned preview yet: {exc}")
+    return result
+
+
+def category_lookup_for_store(store_id: str) -> dict[str, str]:
+    lookup: dict[str, str] = {}
+    categories = mdm.load_item_categories(store_id)
+    if categories.empty:
+        return lookup
+    for _, row in categories.iterrows():
+        category = str(row.get("Category Name", "")).strip()
+        if not category:
+            continue
+        for key in [
+            row.get("Item Key", ""),
+            row.get("Item Code / SKU", ""),
+            row.get("Item Name", ""),
+        ]:
+            normalized = normalize_text(key)
+            if normalized:
+                lookup[normalized] = category
+    return lookup
+
+
+def save_upload_metadata(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+
+
+def read_upload_metadata(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def warning_count_from_metadata(metadata: dict) -> int:
+    warnings = metadata.get("warnings", [])
+    if not isinstance(warnings, list):
+        return 0
+    return sum(1 for item in warnings if str(item.get("Severity", "")).lower() in {"warning", "error"})
+
+
+def save_standardized_upload(
+    file_type: str,
+    df: pd.DataFrame,
+    mapping: dict,
+    uploaded_file,
+    sheet_name: str | None,
+    fy: str | None,
+    issues: list[dict],
+) -> Path:
+    store_id, store_name = ensure_active_store()
+    file_type_key = "sales" if file_type == "sales" else "stock"
+    context = {
+        "store_id": store_id,
+        "store_name": store_name,
+        "fy": fy or "",
+        "source_file_name": uploaded_file.name,
+        "category_lookup": category_lookup_for_store(store_id),
+    }
+    cleaned = apply_mapping(df, mapping, file_type_key, context)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    if file_type_key == "sales":
+        assert fy is not None
+        target = file_manager.get_sales_file_path_for_year(store_id, fy)
+        mapping_path = file_manager.get_sales_mapping_path(store_id, fy)
+        metadata_path = file_manager.get_sales_upload_metadata_path(store_id, fy)
+        original_dir = file_manager.get_sales_original_dir(store_id, fy)
+    else:
+        target = file_manager.get_stock_file_path_for_year(store_id)
+        mapping_path = file_manager.get_stock_mapping_path(store_id)
+        metadata_path = file_manager.get_stock_upload_metadata_path(store_id)
+        original_dir = file_manager.get_stock_original_dir(store_id)
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    cleaned.to_csv(target, index=False)
+    save_mapping(mapping_path, mapping)
+    original_path = file_manager.save_original_upload(uploaded_file, original_dir, timestamp)
+    metadata = {
+        "store_id": store_id,
+        "store_name": store_name,
+        "file_type": file_type_key,
+        "fy": fy if file_type_key == "sales" else None,
+        "original_file_name": uploaded_file.name,
+        "stored_original_path": relative_app_path(original_path),
+        "standardized_file_path": relative_app_path(target),
+        "mapping_path": relative_app_path(mapping_path),
+        "uploaded_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "sheet_name": sheet_name,
+        "row_count_original": int(len(df)),
+        "row_count_cleaned": int(len(cleaned)),
+        "columns_original": [str(col) for col in df.columns],
+        "columns_standardized": [str(col) for col in cleaned.columns],
+        "warnings": issues,
+    }
+    save_upload_metadata(metadata_path, metadata)
+    return target
+
+
+def standardized_file_issues(path: Path | None, file_type: str) -> list[dict]:
+    if path is None or not path.exists():
+        return [{"Severity": "Error", "Field": "File", "Message": "File is missing.", "Row Count": 0, "Example Values": ""}]
+    try:
+        df = read_csv_flexible(path)
+    except Exception as exc:
+        return [{"Severity": "Error", "Field": "File", "Message": f"File could not be read: {exc}", "Row Count": 0, "Example Values": ""}]
+    columns = set(df.columns)
+    issues: list[dict] = []
+    if file_type == "sales":
+        for col in ["Item Key", "Item Name", "Sales Quantity"]:
+            if col not in columns:
+                issues.append({"Severity": "Error", "Field": col, "Message": f"Missing standardized column: {col}", "Row Count": 0, "Example Values": ""})
+        if "Sales Quantity" in columns:
+            bad = to_number(df["Sales Quantity"]).isna() & df["Sales Quantity"].fillna("").astype(str).str.strip().ne("")
+            if int(bad.sum()):
+                issues.append({"Severity": "Error", "Field": "Sales Quantity", "Message": "Sales Quantity is not numeric.", "Row Count": int(bad.sum()), "Example Values": ", ".join(df.loc[bad, "Sales Quantity"].head(5).astype(str))})
+    else:
+        qty_col = "Current Stock Quantity" if "Current Stock Quantity" in columns else "Current Stock Qty" if "Current Stock Qty" in columns else ""
+        for col in ["Item Key", "Item Name"]:
+            if col not in columns:
+                issues.append({"Severity": "Error", "Field": col, "Message": f"Missing standardized column: {col}", "Row Count": 0, "Example Values": ""})
+        if not qty_col:
+            issues.append({"Severity": "Error", "Field": "Current Stock Quantity", "Message": "Missing standardized column: Current Stock Quantity", "Row Count": 0, "Example Values": ""})
+        else:
+            bad = to_number(df[qty_col]).isna() & df[qty_col].fillna("").astype(str).str.strip().ne("")
+            if int(bad.sum()):
+                issues.append({"Severity": "Error", "Field": "Current Stock Quantity", "Message": "Current Stock Quantity is not numeric.", "Row Count": int(bad.sum()), "Example Values": ", ".join(df.loc[bad, qty_col].head(5).astype(str))})
+    return issues
+
+
+def upload_status_row(file_type: str, store_id: str, store_name: str, fy: str | None = None) -> dict:
+    if file_type == "sales":
+        path = file_manager.get_sales_file_path_for_year(store_id, fy or "")
+        mapping_path = file_manager.get_sales_mapping_path(store_id, fy or "")
+        metadata_path = file_manager.get_sales_upload_metadata_path(store_id, fy or "")
+    else:
+        path = file_manager.get_stock_file_path_for_year(store_id)
+        mapping_path = file_manager.get_stock_mapping_path(store_id)
+        metadata_path = file_manager.get_stock_upload_metadata_path(store_id)
+    metadata = read_upload_metadata(metadata_path)
+    cleaned_rows = metadata.get("row_count_cleaned", "")
+    if cleaned_rows == "" and path.exists():
+        try:
+            cleaned_rows = len(read_csv_flexible(path))
+        except Exception:
+            cleaned_rows = ""
+    row = {
+        "Store": f"{store_id} | {store_name}",
+        "Standardized File Exists": path.exists(),
+        "Original File Name": metadata.get("original_file_name", ""),
+        "Uploaded At": metadata.get("uploaded_at", ""),
+        "Mapping Completed": mapping_path.exists() and bool(load_mapping(mapping_path)),
+        "Row Count Cleaned": cleaned_rows,
+        "Warnings Count": warning_count_from_metadata(metadata),
+        "Path": str(path),
+    }
+    if file_type == "sales":
+        row = {"FY": fy or "", **row}
+    return row
+
+
+def render_mapping_viewer(store_id: str, sales_years: list[str], section_prefix: str) -> None:
+    options = ["Stock"] + [f"Sales {fy}" for fy in sales_years]
+    if not options:
+        return
+    choice = st.selectbox("Mapping file", options, key=widget_key(section_prefix, "mapping_choice"))
+    if st.button("View Mapping", key=widget_key(section_prefix, "view_mapping")):
+        st.session_state[widget_key(section_prefix, "selected_mapping")] = choice
+    selected = st.session_state.get(widget_key(section_prefix, "selected_mapping"))
+    if not selected:
+        return
+    if selected == "Stock":
+        mapping_path = file_manager.get_stock_mapping_path(store_id)
+    else:
+        mapping_path = file_manager.get_sales_mapping_path(store_id, selected.replace("Sales ", "", 1))
+    mapping = load_mapping(mapping_path)
+    st.markdown(f"**Mapping: {selected}**")
+    if mapping:
+        st.dataframe(mapping_table(mapping), hide_index=True, width="stretch")
+    else:
+        st.warning("No mapping.json found for this file.")
+
+
+def store_mapping_configuration_rows(store_id: str, store_name: str) -> list[dict]:
+    rows: list[dict] = []
+
+    stock_mapping_path = file_manager.get_stock_mapping_path(store_id)
+    stock_metadata = read_upload_metadata(file_manager.get_stock_upload_metadata_path(store_id))
+    stock_mapping = load_mapping(stock_mapping_path)
+    if stock_mapping:
+        for field, column in stock_mapping.items():
+            rows.append(
+                {
+                    "Store ID": store_id,
+                    "Store Name": store_name,
+                    "File Type": "Stock",
+                    "FY": "",
+                    "Logical Field": field,
+                    "Uploaded Column": column or "Not Available",
+                    "Original File": stock_metadata.get("original_file_name", ""),
+                    "Uploaded At": stock_metadata.get("uploaded_at", ""),
+                    "Mapping Path": str(stock_mapping_path),
+                }
+            )
+
+    for fy in file_manager.list_available_sales_years(store_id):
+        mapping_path = file_manager.get_sales_mapping_path(store_id, fy)
+        metadata = read_upload_metadata(file_manager.get_sales_upload_metadata_path(store_id, fy))
+        mapping = load_mapping(mapping_path)
+        if not mapping:
+            continue
+        for field, column in mapping.items():
+            rows.append(
+                {
+                    "Store ID": store_id,
+                    "Store Name": store_name,
+                    "File Type": "Item-wise Sales",
+                    "FY": fy,
+                    "Logical Field": field,
+                    "Uploaded Column": column or "Not Available",
+                    "Original File": metadata.get("original_file_name", ""),
+                    "Uploaded At": metadata.get("uploaded_at", ""),
+                    "Mapping Path": str(mapping_path),
+                }
+            )
+    return rows
+
+
+def render_dashboard_mapping_configuration() -> None:
+    store_id, store_name = ensure_active_store()
+    st.subheader("Mapping Configuration")
+    st.caption(f"Selected store: {store_name} ({store_id})")
+    rows = store_mapping_configuration_rows(store_id, store_name)
+    if rows:
+        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+    else:
+        st.info("No saved mapping configuration found for this store. Upload sales or stock and complete column mapping.")
+
+
 def refresh_report() -> None:
     if stock_path and sales_paths:
         store_id, store_name = ensure_active_store()
@@ -336,11 +838,11 @@ def render_item_performance(row: pd.Series, monthly: pd.DataFrame, section_prefi
         st.markdown(f"**{title}**")
         values = pd.DataFrame([[col, row.get(col, "")] for col in cols], columns=["Field", "Value"])
         values["Value"] = values["Value"].astype(str)
-        st.dataframe(values, hide_index=True, use_container_width=True)
+        st.dataframe(values, hide_index=True, width="stretch")
 
     history = monthly_history_for_item(monthly, item_key)
     st.markdown("**Monthly Sales History**")
-    st.dataframe(history, hide_index=True, use_container_width=True)
+    st.dataframe(history, hide_index=True, width="stretch")
     if not history.empty:
         st.line_chart(history.set_index("Month")["Sales Qty"])
 
@@ -381,7 +883,7 @@ def render_item_performance(row: pd.Series, monthly: pd.DataFrame, section_prefi
             index=supplier_options.index(current_option) if current_option in supplier_options else 0,
             key=widget_key(section_prefix, "supplier_select", item_key),
         )
-        submitted = st.form_submit_button("Save Item Settings", key=widget_key(section_prefix, "save_item_settings", item_key))
+        submitted = st.form_submit_button("Save Item Settings")
         if submitted:
             category_row = cat_lookup.get(category_choice, cat_lookup.get("Uncategorized", {}))
             category_name = str(category_row.get("Category Name", "Uncategorized")).strip() or "Uncategorized"
@@ -413,7 +915,7 @@ def render_supplier_management(detail: pd.DataFrame | None = None, section_prefi
     if supplier_search.strip() and not supplier_view.empty:
         q = supplier_search.strip().upper()
         supplier_view = supplier_view[supplier_view.apply(lambda r: q in " ".join(r.astype(str)).upper(), axis=1)]
-    st.dataframe(supplier_view[["Supplier ID", "Supplier Name", "Contact Person", "Phone", "Email", "Active", "Updated At"]], hide_index=True, use_container_width=True)
+    st.dataframe(supplier_view[["Supplier ID", "Supplier Name", "Contact Person", "Phone", "Email", "Active", "Updated At"]], hide_index=True, width="stretch")
 
     st.subheader("Add Supplier")
     with st.form(widget_key(section_prefix, "add_supplier_form")):
@@ -423,7 +925,7 @@ def render_supplier_management(detail: pd.DataFrame | None = None, section_prefi
         email = st.text_input("Email", key=widget_key(section_prefix, "add_supplier_email"))
         address = st.text_area("Address", key=widget_key(section_prefix, "add_supplier_address"))
         notes = st.text_area("Notes", key=widget_key(section_prefix, "add_supplier_notes"))
-        if st.form_submit_button("Add Supplier", key=widget_key(section_prefix, "add_supplier_submit")):
+        if st.form_submit_button("Add Supplier"):
             try:
                 supplier_id = mdm.add_supplier(name, contact, phone, email, address, notes)
                 st.success(f"Added supplier {supplier_id}.")
@@ -445,7 +947,7 @@ def render_supplier_management(detail: pd.DataFrame | None = None, section_prefi
             edit_address = st.text_area("Address", value=str(current["Address"]), key=widget_key(section_prefix, "edit_address", supplier_id))
             edit_notes = st.text_area("Notes", value=str(current["Notes"]), key=widget_key(section_prefix, "edit_notes", supplier_id))
             active = st.checkbox("Active", value=str(current["Active"]).upper() == "YES", key=widget_key(section_prefix, "edit_active", supplier_id))
-            if st.form_submit_button("Update Supplier", key=widget_key(section_prefix, "update_supplier_submit", supplier_id)):
+            if st.form_submit_button("Update Supplier"):
                 try:
                     mdm.update_supplier(supplier_id, edit_name, edit_contact, edit_phone, edit_email, edit_address, edit_notes, active)
                     st.success("Supplier updated.")
@@ -466,7 +968,7 @@ def render_supplier_management(detail: pd.DataFrame | None = None, section_prefi
             st.subheader("Supplier Item Mapping View")
             mapped = detail[detail.get("Assigned Supplier ID", pd.Series("", index=detail.index)).astype(str).eq(supplier_id)].copy()
             cols = ["Item Code / SKU", "Item Name", "Current Stock Qty", "Velocity Class", "Final PO Quantity", "Is Discontinued"]
-            st.dataframe(mapped[[c for c in cols if c in mapped.columns]], hide_index=True, use_container_width=True)
+            st.dataframe(mapped[[c for c in cols if c in mapped.columns]], hide_index=True, width="stretch")
 
 
 def render_discontinued_items(detail: pd.DataFrame, section_prefix: str = "discontinued_items") -> None:
@@ -479,7 +981,7 @@ def render_discontinued_items(detail: pd.DataFrame, section_prefix: str = "disco
         q = search.strip().upper()
         view = view[view.apply(lambda r: q in " ".join(r.astype(str)).upper(), axis=1)]
     cols = ["Item Code / SKU", "Item Name", "Current Stock Qty", "Recent Monthly Velocity Qty", "Assigned Supplier Name", "Discontinued Date", "Discontinued Reason"]
-    st.dataframe(view[[c for c in cols if c in view.columns]], hide_index=True, use_container_width=True)
+    st.dataframe(view[[c for c in cols if c in view.columns]], hide_index=True, width="stretch")
     st.download_button(
         "Export discontinued list as CSV",
         data=discontinued_master.to_csv(index=False),
@@ -516,7 +1018,7 @@ def render_categories_view_page(report: dict | None) -> None:
     if search.strip():
         q = search.strip().upper()
         view = view[view.apply(lambda r: q in " ".join(r.astype(str)).upper(), axis=1)]
-    st.dataframe(view[visible_columns(view, ["Category ID", "Category Name", "Box Qty", "Active", "Created At", "Updated At"])], hide_index=True, use_container_width=True)
+    st.dataframe(view[visible_columns(view, ["Category ID", "Category Name", "Box Qty", "Active", "Created At", "Updated At"])], hide_index=True, width="stretch")
     if not view.empty:
         labels = [f"{r['Category ID']} | {r['Category Name']}" for _, r in view.iterrows()]
         selected = st.selectbox("Select category", labels, key=widget_key("categories_view", "selected_category"))
@@ -529,14 +1031,14 @@ def render_categories_view_page(report: dict | None) -> None:
             edit_box = st.number_input("Box Qty", min_value=0.0, value=current_box, step=1.0, key=widget_key("categories_view", "edit_box", category_id))
             edit_active = st.checkbox("Active", value=str(current["Active"]).upper() == "YES", key=widget_key("categories_view", "edit_active", category_id))
             col_a, col_b = st.columns(2)
-            if col_a.form_submit_button("Save Changes", key=widget_key("categories_view", "save", category_id)):
+            if col_a.form_submit_button("Save Changes"):
                 try:
                     mdm.update_category(category_id, edit_name, edit_box, edit_active)
                     st.success("Category updated.")
                     st.rerun()
                 except ValueError as exc:
                     st.error(str(exc))
-            if col_b.form_submit_button("Cancel", key=widget_key("categories_view", "cancel", category_id)):
+            if col_b.form_submit_button("Cancel"):
                 st.rerun()
         col_c, col_d = st.columns(2)
         if col_c.button("Deactivate Category", key=widget_key("categories_view", "deactivate", category_id)):
@@ -554,7 +1056,7 @@ def render_add_category_page() -> None:
     with st.form(widget_key("categories_add", "form")):
         name = st.text_input("Category Name", key=widget_key("categories_add", "name"))
         box_qty = st.number_input("Box Qty", min_value=0.0, value=0.0, step=1.0, key=widget_key("categories_add", "box_qty"))
-        if st.form_submit_button("Add Category", key=widget_key("categories_add", "save")):
+        if st.form_submit_button("Add Category"):
             try:
                 category_id = mdm.add_category(name, box_qty)
                 st.success(f"Added category {category_id}.")
@@ -596,7 +1098,7 @@ def render_item_category_mapping_page(report: dict | None) -> None:
         "Velocity Class",
         "Final PO Quantity",
     ]
-    st.dataframe(view[visible_columns(view, cols)], hide_index=True, use_container_width=True)
+    st.dataframe(view[visible_columns(view, cols)], hide_index=True, width="stretch")
     if view.empty:
         return
     labels = [f"{r['Item Key']} | {r['Item Name']}" for _, r in view.head(500).iterrows()]
@@ -650,7 +1152,7 @@ def render_bulk_category_assignment_page(report: dict | None) -> None:
     ]
     bulk = view[visible_columns(view, cols)].copy()
     bulk.insert(0, "Select", False)
-    edited = st.data_editor(bulk, key=widget_key("bulk_category", "item_selector"), hide_index=True, use_container_width=True)
+    edited = st.data_editor(bulk, key=widget_key("bulk_category", "item_selector"), hide_index=True, width="stretch")
     cat_options, cat_lookup = category_option_labels(include_inactive=False)
     chosen = st.selectbox("Assign category", cat_options, key=widget_key("bulk_category", "category_select"))
     selected = edited[edited["Select"] == True]
@@ -927,15 +1429,16 @@ def run_analysis(selected_paths: list[Path], show_mapping: bool = False) -> None
     sales_mappings = {}
     stock_mapping = {}
     if show_mapping:
-        for path in sales_paths:
-            fy = sales_year(path)
-            sales_mappings[fy] = mapping_editor(path, "sales", f"analysis_sales_{fy}")
-        stock_mapping = mapping_editor(stock_path, "stock", "analysis_stock") if stock_path else {}
-        for fy_key, mapping in sales_mappings.items():
-            qty_error = validate_sales_quantity_column(mapping.get("sales_qty"))
-            if qty_error:
-                st.error(f"{qty_error} FY: {fy_key}")
-                st.stop()
+        st.info("Column mapping is handled during upload. Analysis uses standardized cleaned files only.")
+    validation_rows = []
+    if stock_path:
+        validation_rows.extend(standardized_file_issues(stock_path, "stock"))
+    for path in sales_paths:
+        validation_rows.extend(standardized_file_issues(path, "sales"))
+    if any(str(row.get("Severity", "")).lower() == "error" for row in validation_rows):
+        st.warning("File is not standardized. Please re-upload and complete column mapping.")
+        st.dataframe(pd.DataFrame(validation_rows), hide_index=True, width="stretch")
+        st.stop()
     with st.spinner("Analyzing inventory, sales trends, and purchase requirements..."):
         report = build_report(store_id, store_name, stock_path, sales_paths, settings, sales_mappings, stock_mapping)
         st.session_state["report"] = report
@@ -1040,8 +1543,8 @@ def render_add_supplier_modal() -> None:
             address = st.text_area("Address", key=widget_key("supplier_add_modal", "address"))
             notes = st.text_area("Notes", key=widget_key("supplier_add_modal", "notes"))
             col_a, col_b = st.columns(2)
-            save = col_a.form_submit_button("Save Supplier", key=widget_key("supplier_add_modal", "save"))
-            cancel = col_b.form_submit_button("Cancel", key=widget_key("supplier_add_modal", "cancel"))
+            save = col_a.form_submit_button("Save Supplier")
+            cancel = col_b.form_submit_button("Cancel")
             if cancel:
                 st.session_state["show_add_supplier_modal"] = False
                 st.rerun()
@@ -1090,8 +1593,8 @@ def render_edit_supplier_modal(supplier_id: str, detail: pd.DataFrame | None = N
             notes = st.text_area("Notes", value=str(current["Notes"]), key=widget_key("supplier_edit_modal", "notes", supplier_id))
             active = st.checkbox("Active", value=str(current["Active"]).upper() == "YES", key=widget_key("supplier_edit_modal", "active", supplier_id))
             col_a, col_b = st.columns(2)
-            save = col_a.form_submit_button("Save Changes", key=widget_key("supplier_edit_modal", "save", supplier_id))
-            cancel = col_b.form_submit_button("Cancel", key=widget_key("supplier_edit_modal", "cancel", supplier_id))
+            save = col_a.form_submit_button("Save Changes")
+            cancel = col_b.form_submit_button("Cancel")
             if cancel:
                 st.session_state["edit_supplier_id"] = ""
                 st.rerun()
@@ -1146,6 +1649,7 @@ def render_dashboard_summary(report: dict | None) -> None:
     render_page_header("Inventory PO Planner", "Purchase Manager Dashboard")
     if report is None:
         st.info("Run analysis from Purchase Planning -> Run Analysis.")
+        render_dashboard_mapping_configuration()
         render_data_file_status_page()
         return
     summary = report["Executive Summary"].copy()
@@ -1166,7 +1670,8 @@ def render_dashboard_summary(report: dict | None) -> None:
     with kpis[2]:
         render_kpi_card("PO Value", f"{float(summary_map.get('Total PO value', 0)):,.2f}")
     st.divider()
-    st.dataframe(summary, use_container_width=True, hide_index=True)
+    st.dataframe(summary, width="stretch", hide_index=True)
+    render_dashboard_mapping_configuration()
 
 
 def render_business_recommendations_page(report: dict | None) -> None:
@@ -1182,19 +1687,53 @@ def render_business_recommendations_page(report: dict | None) -> None:
 def render_sales_upload_page() -> None:
     st.title("Upload Item-wise Sales")
     store_caption()
-    store_id = active_store_id()
+    store_id, store_name = ensure_active_store()
     fy = st.selectbox("Financial Year", FINANCIAL_YEARS, index=4, key=widget_key("sales_upload", "financial_year"))
     target = file_manager.get_sales_file_path_for_year(store_id, fy)
     if target.exists():
         st.warning(f"Existing file for {active_store_name()} / {fy} will be replaced.")
-    upload = st.file_uploader("Item-wise sales CSV", type=["csv"], key=widget_key("sales_upload", "file"))
-    if st.button("Save / Replace Sales File", type="primary", key=widget_key("sales_upload", "save")):
-        if upload is None:
-            st.error("Choose a sales CSV before saving.")
-        else:
-            saved = file_manager.save_sales_file(store_id, upload, fy)
-            st.success(f"Saved to {saved}")
-            st.rerun()
+    upload = st.file_uploader("Item-wise sales file", type=["csv", "xlsx", "xls"], key=widget_key("sales_upload", "file"))
+    if upload is not None:
+        section_prefix = f"sales_upload_{store_id}_{fy}"
+        df, sheet_name, read_warnings = read_uploaded_table(upload, section_prefix)
+        for warning in read_warnings:
+            st.warning(warning)
+        if df is not None and not df.empty:
+            existing_mapping = load_mapping(file_manager.get_sales_mapping_path(store_id, fy))
+            template_mapping = render_mapping_template_loader("sales", df, widget_key(section_prefix, "template_loader"))
+            mapping = render_column_mapping_step(
+                df,
+                "sales",
+                existing_mapping=template_mapping or existing_mapping,
+                section_prefix=widget_key(section_prefix, "mapping"),
+            )
+            issues = validate_mapping(df, mapping, "sales")
+            render_mapping_template_actions("sales", mapping, widget_key(section_prefix, "template_actions"))
+            if not has_blocking_errors(issues):
+                preview = apply_mapping(
+                    df,
+                    mapping,
+                    "sales",
+                    {
+                        "store_id": store_id,
+                        "store_name": store_name,
+                        "fy": fy,
+                        "source_file_name": upload.name,
+                    },
+                )
+                st.subheader("Cleaned Preview With Store Context")
+                st.dataframe(preview.head(20), hide_index=True, width="stretch")
+            if st.button(
+                "Save / Replace Sales File",
+                type="primary",
+                disabled=has_blocking_errors(issues),
+                key=widget_key(section_prefix, "save"),
+            ):
+                saved = save_standardized_upload("sales", df, mapping, upload, sheet_name, fy, issues)
+                st.success(f"Saved standardized sales file to {saved}")
+                st.rerun()
+        elif df is not None:
+            st.warning("No rows found in the uploaded sales file.")
     st.subheader("Available FY Files")
     rows = [
         {
@@ -1206,7 +1745,7 @@ def render_sales_upload_page() -> None:
         }
         for y in file_manager.list_available_sales_years(store_id)
     ]
-    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
 
 
 def render_sales_view_page() -> None:
@@ -1243,31 +1782,65 @@ def render_sales_view_page() -> None:
     c3.metric("Rows", len(view))
     st.subheader("Top Items by Quantity")
     top = view.groupby(["Item Code / SKU", "Item Name"], dropna=False)["Sales Quantity"].sum().reset_index().sort_values("Sales Quantity", ascending=False).head(20)
-    st.dataframe(top, hide_index=True, use_container_width=True)
+    st.dataframe(top, hide_index=True, width="stretch")
     st.subheader("Item-wise Sales")
     display = view.copy()
     if "Sales Month" in display.columns:
         display["Month"] = display["Sales Month"].dt.strftime("%Y-%m")
     cols = ["FY", "Month", "Item Code / SKU", "Item Name", "Category / Size / Type", "Sales Quantity", "Sales Amount"]
-    st.dataframe(display[visible_columns(display, cols)], hide_index=True, use_container_width=True)
+    st.dataframe(display[visible_columns(display, cols)], hide_index=True, width="stretch")
 
 
 def render_stock_upload_page() -> None:
     st.title("Upload Stock")
     store_caption()
-    store_id = active_store_id()
+    store_id, store_name = ensure_active_store()
     path = file_manager.get_stock_file_path(store_id)
     if path:
         st.warning(f"Existing stock.csv for {active_store_name()} will be replaced.")
         st.caption(f"Current file last modified: {modified_text(path)}")
-    upload = st.file_uploader("Stock CSV", type=["csv"], key=widget_key("stock_upload", "file"))
-    if st.button("Save / Replace Stock File", type="primary", key=widget_key("stock_upload", "save")):
-        if upload is None:
-            st.error("Choose a stock CSV before saving.")
-        else:
-            saved = file_manager.save_stock_file(store_id, upload)
-            st.success(f"Saved to {saved}")
-            st.rerun()
+    upload = st.file_uploader("Stock file", type=["csv", "xlsx", "xls"], key=widget_key("stock_upload", "file"))
+    if upload is not None:
+        section_prefix = f"stock_upload_{store_id}"
+        df, sheet_name, read_warnings = read_uploaded_table(upload, section_prefix)
+        for warning in read_warnings:
+            st.warning(warning)
+        if df is not None and not df.empty:
+            existing_mapping = load_mapping(file_manager.get_stock_mapping_path(store_id))
+            template_mapping = render_mapping_template_loader("stock", df, widget_key(section_prefix, "template_loader"))
+            mapping = render_column_mapping_step(
+                df,
+                "stock",
+                existing_mapping=template_mapping or existing_mapping,
+                section_prefix=widget_key(section_prefix, "mapping"),
+            )
+            issues = validate_mapping(df, mapping, "stock")
+            render_mapping_template_actions("stock", mapping, widget_key(section_prefix, "template_actions"))
+            if not has_blocking_errors(issues):
+                preview = apply_mapping(
+                    df,
+                    mapping,
+                    "stock",
+                    {
+                        "store_id": store_id,
+                        "store_name": store_name,
+                        "source_file_name": upload.name,
+                        "category_lookup": category_lookup_for_store(store_id),
+                    },
+                )
+                st.subheader("Cleaned Preview With Store Context")
+                st.dataframe(preview.head(20), hide_index=True, width="stretch")
+            if st.button(
+                "Save / Replace Stock File",
+                type="primary",
+                disabled=has_blocking_errors(issues),
+                key=widget_key(section_prefix, "save"),
+            ):
+                saved = save_standardized_upload("stock", df, mapping, upload, sheet_name, None, issues)
+                st.success(f"Saved standardized stock file to {saved}")
+                st.rerun()
+        elif df is not None:
+            st.warning("No rows found in the uploaded stock file.")
 
 
 def render_stock_view_page(report: dict | None) -> None:
@@ -1307,7 +1880,7 @@ def render_stock_view_page(report: dict | None) -> None:
         "Stock Coverage Months",
         "Final PO Quantity",
     ]
-    st.dataframe(view[visible_columns(view, cols)], hide_index=True, use_container_width=True)
+    st.dataframe(view[visible_columns(view, cols)], hide_index=True, width="stretch")
     if not view.empty:
         labels = [f"{r['Item Key']} | {r['Item Name']}" for _, r in view.head(500).iterrows()]
         selected = st.selectbox("Select item to view/edit", labels, key=widget_key("stock_view", "selected_item"))
@@ -1378,7 +1951,7 @@ def render_bulk_supplier_assignment_page(report: dict | None) -> None:
     cols = ["Item Key", "Item Code / SKU", "Item Name", "Category / Size / Type", "Current Stock Qty", "Velocity Class", "Assigned Supplier Name", "Is Discontinued"]
     bulk = detail[visible_columns(detail, cols)].copy()
     bulk.insert(0, "Select", False)
-    edited = st.data_editor(bulk, key=widget_key("bulk_supplier", "item_selector"), hide_index=True, use_container_width=True)
+    edited = st.data_editor(bulk, key=widget_key("bulk_supplier", "item_selector"), hide_index=True, width="stretch")
     choice = st.selectbox("Assigned Supplier", supplier_options(True), key=widget_key("bulk_supplier", "supplier_select"))
     selected = edited[edited["Select"] == True]
     col_a, col_b = st.columns(2)
@@ -1410,7 +1983,7 @@ def render_bulk_mark_discontinued_page(report: dict | None) -> None:
     cols = ["Item Key", "Item Code / SKU", "Item Name", "Category / Size / Type", "Current Stock Qty", "Velocity Class", "Recent Monthly Velocity Qty", "Final PO Quantity", "Is Discontinued", "Assigned Supplier Name"]
     bulk = detail[visible_columns(detail, cols)].copy()
     bulk.insert(0, "Select", False)
-    edited = st.data_editor(bulk, key=widget_key("bulk_discontinued", "item_selector"), hide_index=True, use_container_width=True)
+    edited = st.data_editor(bulk, key=widget_key("bulk_discontinued", "item_selector"), hide_index=True, width="stretch")
     selected = edited[edited["Select"] == True]
     reason = st.text_input("Discontinued Reason", key=widget_key("bulk_discontinued", "reason"))
     col_a, col_b = st.columns(2)
@@ -1436,7 +2009,7 @@ def render_suppliers_view_page(report: dict | None) -> None:
     if search.strip() and not view.empty:
         q = search.strip().upper()
         view = view[view.apply(lambda r: q in " ".join(r.astype(str)).upper(), axis=1)]
-    st.dataframe(view[visible_columns(view, ["Supplier ID", "Supplier Name", "Contact Person", "Phone", "Email", "Active", "Updated At"])], hide_index=True, use_container_width=True)
+    st.dataframe(view[visible_columns(view, ["Supplier ID", "Supplier Name", "Contact Person", "Phone", "Email", "Active", "Updated At"])], hide_index=True, width="stretch")
     col_a, col_b = st.columns(2)
     if col_a.button("Add Supplier", key=widget_key("suppliers_view", "add_supplier")):
         st.session_state["show_add_supplier_modal"] = True
@@ -1456,11 +2029,11 @@ def render_supplier_item_mapping_page(report: dict | None) -> None:
     st.title("Supplier Item Mapping")
     store_caption()
     mappings = mdm.load_item_suppliers(active_store_id())
-    st.dataframe(mappings, hide_index=True, use_container_width=True)
+    st.dataframe(mappings, hide_index=True, width="stretch")
     if report is not None:
         st.subheader("Current Item Assignments")
         cols = ["Item Code / SKU", "Item Name", "Assigned Supplier ID", "Assigned Supplier Name", "Supplier Source", "Current Stock Qty", "Velocity Class", "Final PO Quantity", "Is Discontinued"]
-        st.dataframe(report["Detailed Item Analysis"][visible_columns(report["Detailed Item Analysis"], cols)], hide_index=True, use_container_width=True)
+        st.dataframe(report["Detailed Item Analysis"][visible_columns(report["Detailed Item Analysis"], cols)], hide_index=True, width="stretch")
 
 
 def render_purchase_run_analysis_page() -> None:
@@ -1484,22 +2057,34 @@ def render_purchase_run_analysis_page() -> None:
         st.info("Saved sales years: " + ", ".join(sales_years_from_paths(paths)))
     else:
         st.warning("No item-wise sales files found for the selected store. Upload at least one FY sales file.")
-    st.subheader("Column Mapping")
+    st.subheader("Pre-run Standardized File Validation")
+    validation_rows = []
+    if stock:
+        for issue in standardized_file_issues(stock, "stock"):
+            validation_rows.append({"File Type": "Stock", "FY": "", "Path": str(stock), **issue})
+    if paths:
+        for path in paths:
+            fy = sales_year(path)
+            for issue in standardized_file_issues(path, "sales"):
+                validation_rows.append({"File Type": "Sales", "FY": fy, "Path": str(path), **issue})
+    validation_errors = [row for row in validation_rows if str(row.get("Severity", "")).lower() == "error"]
+    if validation_rows:
+        st.warning("File is not standardized. Please re-upload and complete column mapping.")
+        st.dataframe(pd.DataFrame(validation_rows), hide_index=True, width="stretch")
+    elif stock and paths:
+        st.success("Standardized stock and sales files are ready for analysis.")
     if stock and paths:
         stock_path = stock
         sales_paths = paths
         settings = current_settings()
         sales_mappings = {}
-        for path in sales_paths:
-            fy = sales_year(path)
-            sales_mappings[fy] = mapping_editor(path, "sales", f"analysis_sales_{fy}")
-        stock_mapping = mapping_editor(stock_path, "stock", "analysis_stock")
-        for fy_key, mapping in sales_mappings.items():
-            qty_error = validate_sales_quantity_column(mapping.get("sales_qty"))
-            if qty_error:
-                st.error(f"{qty_error} FY: {fy_key}")
-                st.stop()
-        if st.button("Run Analysis", type="primary", key=widget_key("purchase_run", "run_analysis")):
+        stock_mapping = {}
+        if st.button(
+            "Run Analysis",
+            type="primary",
+            disabled=bool(validation_errors),
+            key=widget_key("purchase_run", "run_analysis"),
+        ):
             with st.spinner("Analyzing inventory, sales trends, and purchase requirements..."):
                 report = build_report(store_id, store_name, stock_path, sales_paths, settings, sales_mappings, stock_mapping)
                 st.session_state["report"] = report
@@ -1531,7 +2116,7 @@ def render_table_page(title: str, report: dict | None, sheet: str, section_prefi
     df = report.get(sheet, pd.DataFrame()).copy()
     if columns:
         df = df[visible_columns(df, columns)]
-    st.dataframe(df, hide_index=True, use_container_width=True)
+    st.dataframe(df, hide_index=True, width="stretch")
 
 
 def render_detailed_item_analysis_page(report: dict | None) -> None:
@@ -1540,7 +2125,7 @@ def render_detailed_item_analysis_page(report: dict | None) -> None:
         st.warning("Run analysis first.")
         return
     view = filter_detail(report["Detailed Item Analysis"], "detail_page")
-    st.dataframe(view[visible_columns(view, DETAIL_COLUMNS)], hide_index=True, use_container_width=True)
+    st.dataframe(view[visible_columns(view, DETAIL_COLUMNS)], hide_index=True, width="stretch")
 
 
 def render_optimized_po_page(report: dict | None) -> None:
@@ -1569,7 +2154,7 @@ def render_optimized_po_page(report: dict | None) -> None:
         selected_supplier = st.multiselect("Supplier", supplier, key=widget_key("optimized_po", "supplier_filter"))
         if selected_supplier:
             po = po[po["Assigned Supplier Name"].fillna("Unknown Supplier").astype(str).isin(selected_supplier)]
-    st.dataframe(po, hide_index=True, use_container_width=True)
+    st.dataframe(po, hide_index=True, width="stretch")
     if po.empty:
         st.info("No items in Optimized PO.")
         return
@@ -1671,7 +2256,7 @@ def render_supplier_ready_po_page(report: dict | None) -> None:
         editable_df,
         key=widget_key("supplier_ready_po", "editable_po_table", active_run_id),
         hide_index=True,
-        use_container_width=True,
+        width="stretch",
         disabled=disabled_cols,
         column_config={
             "Quantity": st.column_config.NumberColumn("Quantity", min_value=0, step=1),
@@ -1766,7 +2351,7 @@ def render_result_history_page(report: dict | None) -> None:
         st.info("No saved analysis results found for the selected store. Run analysis to generate one.")
         return
     display = runs[["Store ID", "Store Name", "Run ID", "Created At", "Sales Years", "Total Items", "PO Items", "Urgent Items", "High Items", "Total PO Value"]].copy()
-    st.dataframe(display, hide_index=True, use_container_width=True)
+    st.dataframe(display, hide_index=True, width="stretch")
     run_options = runs["Run ID"].astype(str).tolist()
     current = st.session_state.get("selected_result_run_id", run_options[0])
     index = run_options.index(current) if current in run_options else 0
@@ -1817,11 +2402,11 @@ def render_data_validation_page(report: dict | None) -> None:
     if report is None:
         st.warning("Run analysis first.")
         return
-    st.dataframe(report["Data Validation"], use_container_width=True, hide_index=True)
+    st.dataframe(report["Data Validation"], width="stretch", hide_index=True)
     warnings = report.get("Velocity Calculation Warnings", pd.DataFrame())
     if not warnings.empty:
         st.subheader("Velocity Calculation Warnings")
-        st.dataframe(warnings, use_container_width=True, hide_index=True)
+        st.dataframe(warnings, width="stretch", hide_index=True)
 
 
 def render_analysis_settings_page() -> None:
@@ -1846,14 +2431,11 @@ def render_analysis_settings_page() -> None:
 def render_data_file_status_page() -> None:
     st.title("Data File Status")
     store_caption()
-    store_id = active_store_id()
+    store_id, store_name = ensure_active_store()
     stock = file_manager.get_stock_file_path(store_id)
-    sales_rows = []
-    for fy in file_manager.list_available_sales_years(store_id):
-        path = file_manager.get_sales_file_path_for_year(store_id, fy)
-        sales_rows.append({"Store ID": store_id, "Store Name": active_store_name(), "FY": fy, "Available": path.exists(), "Last Modified": modified_text(path), "Path": str(path)})
-    stock_path = stock or (file_manager.get_store_stock_dir(store_id) / file_manager.STOCK_FILENAME)
-    stock_rows = [{"Store ID": store_id, "Store Name": active_store_name(), "Available": bool(stock), "Last Modified": modified_text(stock), "Path": str(stock_path)}]
+    sales_years = file_manager.list_available_sales_years(store_id)
+    sales_rows = [upload_status_row("sales", store_id, store_name, fy) for fy in sales_years]
+    stock_rows = [upload_status_row("stock", store_id, store_name)]
     master_rows = []
     for name, path in {
         "discontinued-items.csv": mdm.discontinued_path(store_id),
@@ -1865,11 +2447,13 @@ def render_data_file_status_page() -> None:
     }.items():
         master_rows.append({"File": name, "Available": path.exists(), "Last Modified": modified_text(path), "Path": str(path)})
     st.subheader("Stock")
-    st.dataframe(pd.DataFrame(stock_rows), hide_index=True, use_container_width=True)
+    st.dataframe(pd.DataFrame(stock_rows), hide_index=True, width="stretch")
     st.subheader("Sales Files")
-    st.dataframe(pd.DataFrame(sales_rows), hide_index=True, use_container_width=True)
+    st.dataframe(pd.DataFrame(sales_rows), hide_index=True, width="stretch")
+    st.subheader("View Mapping")
+    render_mapping_viewer(store_id, sales_years, "data_file_status")
     st.subheader("Master Files")
-    st.dataframe(pd.DataFrame(master_rows), hide_index=True, use_container_width=True)
+    st.dataframe(pd.DataFrame(master_rows), hide_index=True, width="stretch")
 
 
 def switch_active_store(store_id: str) -> None:
@@ -1884,110 +2468,323 @@ def switch_active_store(store_id: str) -> None:
         set_active_result_state(loaded, "latest", str(store["Store ID"]))
 
 
-def render_stores_view_page() -> None:
-    st.title("Stores")
+def _store_is_active(row: pd.Series) -> bool:
+    return str(row.get("Active", "Yes")).strip().upper() == "YES"
+
+
+def _set_store_flash(level: str, message: str) -> None:
+    st.session_state["stores_flash"] = {"level": level, "message": message}
+
+
+def _render_store_flash() -> None:
+    flash = st.session_state.pop("stores_flash", None)
+    if not isinstance(flash, dict):
+        return
+    level = str(flash.get("level", "info"))
+    message = str(flash.get("message", ""))
+    if not message:
+        return
+    if level == "success":
+        st.success(message)
+    elif level == "warning":
+        st.warning(message)
+    elif level == "error":
+        st.error(message)
+    else:
+        st.info(message)
+
+
+def _after_store_deactivated(store_id: str) -> None:
+    current_active_store = st.session_state.get("active_store_id") or active_store_id()
+    if store_id == current_active_store:
+        clear_active_result_state()
+        st.session_state.pop("active_store_id", None)
+        ensure_active_store()
+
+
+def _dialog_decorator(title: str, width: str = "medium"):
+    try:
+        return st.dialog(title, width=width)
+    except TypeError:
+        return st.dialog(title)
+
+
+def _mark_store_form_dialog() -> None:
+    st.markdown('<span class="store-form-dialog"></span>', unsafe_allow_html=True)
+
+
+def _close_store_add_modal() -> None:
+    st.session_state["show_store_add_modal"] = False
+
+
+def _close_store_edit_modal() -> None:
+    st.session_state["edit_store_id"] = ""
+
+
+def _set_store_confirmation(action: str, store_id: str, store_name: str) -> None:
+    st.session_state["show_store_add_modal"] = False
+    st.session_state["edit_store_id"] = ""
+    st.session_state["store_action_confirmation"] = {
+        "action": action,
+        "store_id": store_id,
+        "store_name": store_name,
+    }
+
+
+def _clear_store_confirmation() -> None:
+    st.session_state.pop("store_action_confirmation", None)
+
+
+def _render_dialog_top_close(key: str, close_action) -> None:
+    close_cols = st.columns([6, 1])
+    close_cols[0].empty()
+    if close_cols[1].button("Close", key=key, width="stretch"):
+        close_action()
+        st.rerun()
+
+
+def _render_store_add_modal() -> None:
+    def body() -> None:
+        _mark_store_form_dialog()
+        _render_dialog_top_close(widget_key("stores_add_modal", "top_close"), _close_store_add_modal)
+        with st.form(widget_key("stores_add_modal", "form")):
+            name = st.text_input("Store Name", key=widget_key("stores_add_modal", "name"))
+            location = st.text_input("Location", key=widget_key("stores_add_modal", "location"))
+            contact = st.text_input("Contact Person", key=widget_key("stores_add_modal", "contact"))
+            phone = st.text_input("Phone", key=widget_key("stores_add_modal", "phone"))
+            notes = st.text_area("Notes", key=widget_key("stores_add_modal", "notes"))
+            make_active = st.checkbox("Switch to this store after adding", value=True, key=widget_key("stores_add_modal", "make_active"))
+            col_a, col_b = st.columns(2)
+            save = col_a.form_submit_button("Add Store", type="primary")
+            cancel = col_b.form_submit_button("Cancel")
+            if cancel:
+                st.session_state["show_store_add_modal"] = False
+                st.rerun()
+            if save:
+                try:
+                    store_id = store_manager.add_store(name, location, contact, phone, notes)
+                    file_manager.ensure_store_dirs(store_id)
+                    mdm.ensure_store_master_files(store_id)
+                    result_store.ensure_result_dirs(store_id)
+                    if make_active:
+                        switch_active_store(store_id)
+                    st.session_state["show_store_add_modal"] = False
+                    _set_store_flash("success", f"Added store {store_id}.")
+                    st.rerun()
+                except ValueError as exc:
+                    st.error(str(exc))
+
+    if hasattr(st, "dialog"):
+        @_dialog_decorator("Add Store", width="large")
+        def add_dialog():
+            body()
+
+        add_dialog()
+    else:
+        with st.expander("Add Store", expanded=True):
+            body()
+
+
+def _render_store_edit_modal(store_id: str) -> None:
     stores = store_manager.load_stores(active_only=False)
-    search = st.text_input("Search stores", key=widget_key("stores_view", "search"))
+    rows = stores[stores["Store ID"].astype(str).eq(str(store_id))]
+    if rows.empty:
+        st.session_state["edit_store_id"] = ""
+        st.warning("Store not found.")
+        return
+    current = rows.iloc[0]
+
+    def body() -> None:
+        _mark_store_form_dialog()
+        _render_dialog_top_close(widget_key("stores_edit_modal", "top_close", store_id), _close_store_edit_modal)
+        st.text_input("Store ID", value=str(current["Store ID"]), disabled=True, key=widget_key("stores_edit_modal", "store_id", store_id))
+        with st.form(widget_key("stores_edit_modal", "form", store_id)):
+            name = st.text_input("Store Name", value=str(current["Store Name"]), key=widget_key("stores_edit_modal", "name", store_id))
+            location = st.text_input("Location", value=str(current["Location"]), key=widget_key("stores_edit_modal", "location", store_id))
+            contact = st.text_input("Contact Person", value=str(current["Contact Person"]), key=widget_key("stores_edit_modal", "contact", store_id))
+            phone = st.text_input("Phone", value=str(current["Phone"]), key=widget_key("stores_edit_modal", "phone", store_id))
+            notes = st.text_area("Notes", value=str(current["Notes"]), key=widget_key("stores_edit_modal", "notes", store_id))
+            active = st.checkbox("Active", value=_store_is_active(current), key=widget_key("stores_edit_modal", "active", store_id))
+            col_a, col_b = st.columns(2)
+            save = col_a.form_submit_button("Save Store", type="primary")
+            cancel = col_b.form_submit_button("Cancel")
+            if cancel:
+                st.session_state["edit_store_id"] = ""
+                st.rerun()
+            if save:
+                try:
+                    store_manager.update_store(store_id, name, location, contact, phone, notes, active)
+                    if store_id == active_store_id():
+                        if active:
+                            st.session_state["active_store_name"] = name
+                        else:
+                            _after_store_deactivated(store_id)
+                    st.session_state["edit_store_id"] = ""
+                    _set_store_flash("success", "Store updated.")
+                    st.rerun()
+                except ValueError as exc:
+                    st.error(str(exc))
+
+    title = f"Edit Store: {current['Store Name']}"
+    if hasattr(st, "dialog"):
+        @_dialog_decorator(title, width="large")
+        def edit_dialog():
+            body()
+
+        edit_dialog()
+    else:
+        with st.expander(title, expanded=True):
+            body()
+
+
+def _render_store_card(row: pd.Series) -> None:
+    store_id = str(row.get("Store ID", "")).strip()
+    store_name = str(row.get("Store Name", "")).strip() or store_id
+    is_active = _store_is_active(row)
+    active_store = st.session_state.get("active_store_id") or active_store_id()
+    is_current = store_id == active_store
+
+    with st.container(border=True):
+        header_cols = st.columns([4, 1])
+        header_cols[0].subheader(store_name)
+        header_cols[0].caption(store_id)
+        if is_active:
+            header_cols[1].success("Active")
+        else:
+            header_cols[1].warning("Inactive")
+
+        details = [
+            ("Location", row.get("Location", "")),
+            ("Contact", row.get("Contact Person", "")),
+            ("Phone", row.get("Phone", "")),
+            ("Updated", row.get("Updated At", "")),
+        ]
+        st.caption(" | ".join([f"{label}: {value or '-'}" for label, value in details]))
+        notes = str(row.get("Notes", "")).strip()
+        if notes:
+            st.caption(f"Notes: {notes}")
+
+        action_cols = st.columns(3)
+        switch_label = "Current Store" if is_current else "Switch"
+        if action_cols[0].button(
+            switch_label,
+            disabled=is_current or not is_active,
+            key=widget_key("stores_view", "switch", store_id),
+            width="stretch",
+        ):
+            _set_store_confirmation("switch", store_id, store_name)
+            st.rerun()
+
+        active_label = "Deactivate" if is_active else "Activate"
+        if action_cols[1].button(active_label, key=widget_key("stores_view", "toggle_active", store_id), width="stretch"):
+            if is_active:
+                _set_store_confirmation("deactivate", store_id, store_name)
+            else:
+                store_manager.reactivate_store(store_id)
+                _set_store_flash("success", f"Activated {store_name}.")
+            st.rerun()
+
+        if action_cols[2].button("Edit", key=widget_key("stores_view", "edit", store_id), width="stretch"):
+            st.session_state["edit_store_id"] = store_id
+            st.session_state["show_store_add_modal"] = False
+            _clear_store_confirmation()
+            st.rerun()
+
+
+def _render_store_confirmation_modal() -> None:
+    confirmation = st.session_state.get("store_action_confirmation")
+    if not isinstance(confirmation, dict):
+        return
+    action = str(confirmation.get("action", ""))
+    store_id = str(confirmation.get("store_id", "")).strip()
+    store_name = str(confirmation.get("store_name", "")).strip() or store_id
+    if action not in {"switch", "deactivate"} or not store_id:
+        _clear_store_confirmation()
+        return
+
+    title = "Switch Store" if action == "switch" else "Deactivate Store"
+    confirm_label = "Switch Store" if action == "switch" else "Deactivate Store"
+    message = (
+        f"Switch the active store to {store_name} ({store_id})? "
+        "Any currently loaded result context will be replaced with this store's latest result."
+        if action == "switch"
+        else f"Deactivate {store_name} ({store_id})? The store will be hidden from active-store selection. "
+        "If this is the current store, the app will move to another active store."
+    )
+
+    def body() -> None:
+        _render_dialog_top_close(widget_key("stores_confirm", "top_close", f"{action}_{store_id}"), _clear_store_confirmation)
+        st.markdown(f'<div class="store-confirm-copy">{message}</div>', unsafe_allow_html=True)
+        col_a, col_b = st.columns(2)
+        if col_a.button(confirm_label, type="primary", key=widget_key("stores_confirm", "confirm", f"{action}_{store_id}"), width="stretch"):
+            if action == "switch":
+                switch_active_store(store_id)
+                _set_store_flash("success", f"Switched to {store_name}.")
+            else:
+                store_manager.deactivate_store(store_id)
+                _after_store_deactivated(store_id)
+                _set_store_flash("warning", f"Deactivated {store_name}.")
+            _clear_store_confirmation()
+            st.rerun()
+        if col_b.button("Cancel", key=widget_key("stores_confirm", "cancel", f"{action}_{store_id}"), width="stretch"):
+            _clear_store_confirmation()
+            st.rerun()
+
+    if hasattr(st, "dialog"):
+        @_dialog_decorator(title, width="medium")
+        def confirm_dialog():
+            body()
+
+        confirm_dialog()
+    else:
+        with st.expander(title, expanded=True):
+            body()
+
+
+def render_stores_view_page() -> None:
+    st.title("Manage Stores")
+    stores = store_manager.load_stores(active_only=False)
+    _render_store_flash()
+    top_cols = st.columns([3, 1])
+    search = top_cols[0].text_input("Search stores", key=widget_key("stores_view", "search"))
+    if top_cols[1].button("Add Store", type="primary", key=widget_key("stores_view", "add_store"), width="stretch"):
+        st.session_state["show_store_add_modal"] = True
+        st.session_state["edit_store_id"] = ""
+        _clear_store_confirmation()
+        st.rerun()
+
     view = stores.copy()
     if search.strip() and not view.empty:
         q = search.strip().upper()
         view = view[view.apply(lambda r: q in " ".join(r.astype(str)).upper(), axis=1)]
-    st.dataframe(
-        view[visible_columns(view, ["Store ID", "Store Name", "Location", "Contact Person", "Phone", "Active", "Created At", "Updated At"])],
-        hide_index=True,
-        use_container_width=True,
-    )
+
     if view.empty:
-        return
-    labels = [f"{r['Store ID']} | {r['Store Name']}" for _, r in view.iterrows()]
-    selected = st.selectbox("Select store", labels, key=widget_key("stores_view", "selected_store"))
-    selected_id = selected.split(" | ", 1)[0]
-    current = stores[stores["Store ID"].astype(str).eq(selected_id)].iloc[0]
-    with st.form(widget_key("stores_view", "edit_form", selected_id)):
-        name = st.text_input("Store Name", value=str(current["Store Name"]), key=widget_key("stores_view", "edit_name", selected_id))
-        location = st.text_input("Location", value=str(current["Location"]), key=widget_key("stores_view", "edit_location", selected_id))
-        contact = st.text_input("Contact Person", value=str(current["Contact Person"]), key=widget_key("stores_view", "edit_contact", selected_id))
-        phone = st.text_input("Phone", value=str(current["Phone"]), key=widget_key("stores_view", "edit_phone", selected_id))
-        notes = st.text_area("Notes", value=str(current["Notes"]), key=widget_key("stores_view", "edit_notes", selected_id))
-        active = st.checkbox("Active", value=str(current["Active"]).upper() == "YES", key=widget_key("stores_view", "edit_active", selected_id))
-        if st.form_submit_button("Save Store", key=widget_key("stores_view", "save", selected_id)):
-            try:
-                store_manager.update_store(selected_id, name, location, contact, phone, notes, active)
-                if selected_id == active_store_id():
-                    st.session_state["active_store_name"] = name
-                st.success("Store updated.")
-                st.rerun()
-            except ValueError as exc:
-                st.error(str(exc))
-    col_a, col_b, col_c = st.columns(3)
-    if col_a.button("Switch to Selected Store", key=widget_key("stores_view", "switch", selected_id)):
-        switch_active_store(selected_id)
-        st.rerun()
-    if col_b.button("Deactivate Store", key=widget_key("stores_view", "deactivate", selected_id)):
-        current_active_store = st.session_state.get("active_store_id") or active_store_id()
-        was_active = selected_id == current_active_store
-        store_manager.deactivate_store(selected_id)
-        if was_active:
-            clear_active_result_state()
-            st.session_state.pop("active_store_id", None)
-            ensure_active_store()
-        st.success("Store deactivated.")
-        st.rerun()
-    if col_c.button("Reactivate Store", key=widget_key("stores_view", "reactivate", selected_id)):
-        store_manager.reactivate_store(selected_id)
-        st.success("Store reactivated.")
-        st.rerun()
+        st.info("No stores matched your search.")
+    else:
+        for _, row in view.iterrows():
+            _render_store_card(row)
 
-
-def render_add_store_page() -> None:
-    st.title("Add Store")
-    with st.form(widget_key("stores_add", "form")):
-        name = st.text_input("Store Name", key=widget_key("stores_add", "name"))
-        location = st.text_input("Location", key=widget_key("stores_add", "location"))
-        contact = st.text_input("Contact Person", key=widget_key("stores_add", "contact"))
-        phone = st.text_input("Phone", key=widget_key("stores_add", "phone"))
-        notes = st.text_area("Notes", key=widget_key("stores_add", "notes"))
-        make_active = st.checkbox("Switch to this store after adding", value=True, key=widget_key("stores_add", "make_active"))
-        if st.form_submit_button("Add Store", key=widget_key("stores_add", "save")):
-            try:
-                store_id = store_manager.add_store(name, location, contact, phone, notes)
-                file_manager.ensure_store_dirs(store_id)
-                mdm.ensure_store_master_files(store_id)
-                result_store.ensure_result_dirs(store_id)
-                if make_active:
-                    switch_active_store(store_id)
-                st.success(f"Added store {store_id}.")
-                st.rerun()
-            except ValueError as exc:
-                st.error(str(exc))
+    if st.session_state.get("show_store_add_modal"):
+        _render_store_add_modal()
+    if st.session_state.get("edit_store_id"):
+        _render_store_edit_modal(str(st.session_state["edit_store_id"]))
+    _render_store_confirmation_modal()
 
 
 def render_store_data_status_page() -> None:
     st.title("Store Data Status")
     store_caption()
-    store_id = active_store_id()
+    store_id, store_name = ensure_active_store()
     status = file_manager.get_store_data_status(store_id)
     st.subheader("Stock")
-    stock_rows = [
-        {
-            "Available": Path(row["Path"]).exists(),
-            "Last Modified": modified_text(Path(row["Path"])),
-            "Path": str(row["Path"]),
-        }
-        for row in status["stock_files"]
-    ]
-    st.dataframe(pd.DataFrame(stock_rows or [{"Available": False, "Last Modified": "Not available", "Path": str(status["stock_path"])}]), hide_index=True, use_container_width=True)
+    stock_rows = [upload_status_row("stock", store_id, store_name)]
+    st.dataframe(pd.DataFrame(stock_rows or [{"Available": False, "Last Modified": "Not available", "Path": str(status["stock_path"])}]), hide_index=True, width="stretch")
     st.subheader("Sales Files")
-    sales_rows = [
-        {
-            "FY": row["FY"],
-            "Available": Path(row["Path"]).exists(),
-            "Last Modified": modified_text(Path(row["Path"])),
-            "Path": str(row["Path"]),
-        }
-        for row in status["sales_files"]
-    ]
-    st.dataframe(pd.DataFrame(sales_rows), hide_index=True, use_container_width=True)
+    sales_years = status["sales_years"]
+    sales_rows = [upload_status_row("sales", store_id, store_name, fy) for fy in sales_years]
+    st.dataframe(pd.DataFrame(sales_rows), hide_index=True, width="stretch")
+    st.subheader("View Mapping")
+    render_mapping_viewer(store_id, sales_years, "store_data_status")
     st.subheader("Latest Result")
     st.dataframe(
         pd.DataFrame(
@@ -2001,7 +2798,7 @@ def render_store_data_status_page() -> None:
             ]
         ),
         hide_index=True,
-        use_container_width=True,
+        width="stretch",
     )
     st.subheader("Store Master Files")
     rows = []
@@ -2011,7 +2808,7 @@ def render_store_data_status_page() -> None:
         "item-categories.csv": mdm.item_categories_path(store_id),
     }.items():
         rows.append({"File": name, "Available": path.exists(), "Last Modified": modified_text(path), "Path": str(path)})
-    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
 
 
 def render_debug_item_velocity_page(report: dict | None) -> None:
@@ -2030,7 +2827,7 @@ def render_debug_item_velocity_page(report: dict | None) -> None:
     )
     for title, df in debug_report.items():
         st.subheader(title)
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        st.dataframe(df, width="stretch", hide_index=True)
 
 
 stock_path = file_manager.get_stock_file_path(active_store_id())
@@ -2047,7 +2844,7 @@ NAV_ITEMS = {
     },
     "Stores": {
         "icon": "ST",
-        "pages": ["View Stores", "Add Store", "Store Data Status"],
+        "pages": ["Manage Stores", "Store Data Status"],
     },
     "Item-wise Sales": {
         "icon": "🧾",
@@ -2269,6 +3066,28 @@ def inject_ui_css() -> None:
             font-weight: 700;
             color: #0f172a;
         }
+        div[data-testid="stDialog"] div[role="dialog"]:has(.store-form-dialog) {
+            width: 75vw !important;
+            max-width: 75vw !important;
+        }
+        div[data-testid="stDialog"] div[role="dialog"]:has(.store-form-dialog) div[data-testid="stForm"] {
+            border: 0;
+            padding: 0;
+        }
+        .store-form-dialog {
+            display: none;
+        }
+        .store-confirm-copy {
+            padding: 0.75rem 0 1rem;
+            color: #334155;
+            line-height: 1.55;
+        }
+        @media (max-width: 900px) {
+            div[data-testid="stDialog"] div[role="dialog"]:has(.store-form-dialog) {
+                width: 94vw !important;
+                max-width: 94vw !important;
+            }
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -2325,6 +3144,9 @@ def render_sidebar() -> tuple[str, str]:
         st.session_state["nav_active_menu"] = "Dashboard"
     if "nav_active_page" not in st.session_state:
         st.session_state["nav_active_page"] = "Executive Summary"
+    active_pages = get_page_options(st.session_state["nav_active_menu"])
+    if st.session_state["nav_active_page"] not in active_pages:
+        st.session_state["nav_active_page"] = active_pages[0]
 
     st.sidebar.markdown('<div class="sidebar-title">Inventory PO Planner</div>', unsafe_allow_html=True)
     st.sidebar.markdown('<div class="sidebar-subtitle">Purchase Manager Dashboard</div>', unsafe_allow_html=True)
@@ -2345,16 +3167,16 @@ def render_sidebar() -> tuple[str, str]:
         if selected_store_id != store_id:
             switch_active_store(selected_store_id)
             st.rerun()
-    if st.sidebar.button("Manage Stores", key=widget_key("sidebar", "manage_stores"), use_container_width=True):
-        set_active_route("Stores", "View Stores")
+    if st.sidebar.button("Manage Stores", key=widget_key("sidebar", "manage_stores"), width="stretch"):
+        set_active_route("Stores", "Manage Stores")
         st.rerun()
     render_sidebar_status_card(st.session_state.get("active_manifest", {}))
 
     st.sidebar.markdown('<div class="sidebar-section-label">Quick Actions</div>', unsafe_allow_html=True)
-    if st.sidebar.button("▶ Run Analysis", key=widget_key("sidebar_quick", "run_analysis"), use_container_width=True):
+    if st.sidebar.button("▶ Run Analysis", key=widget_key("sidebar_quick", "run_analysis"), width="stretch"):
         set_active_route("Purchase Planning", "Run Analysis")
         st.rerun()
-    if st.sidebar.button("↻ Load Latest", key=widget_key("sidebar_quick", "load_latest"), use_container_width=True):
+    if st.sidebar.button("↻ Load Latest", key=widget_key("sidebar_quick", "load_latest"), width="stretch"):
         if load_latest_result_into_state():
             st.rerun()
         st.sidebar.warning("No saved result found.")
@@ -2376,7 +3198,7 @@ def render_sidebar() -> tuple[str, str]:
         header_marker = "▾" if expanded else "▸"
         active_marker = "●" if is_active_menu else " "
         header_label = f"{config['icon']} {active_marker} {menu_name} {header_marker}"
-        if st.sidebar.button(header_label, key=widget_key("nav_menu", menu_name), use_container_width=True):
+        if st.sidebar.button(header_label, key=widget_key("nav_menu", menu_name), width="stretch"):
             if st.session_state.get("nav_expanded_menu") == menu_name:
                 st.session_state["nav_expanded_menu"] = None
             else:
@@ -2391,7 +3213,7 @@ def render_sidebar() -> tuple[str, str]:
                 is_active_page = st.session_state.get("nav_active_menu") == menu_name and st.session_state.get("nav_active_page") == page_name
                 page_marker = "●" if is_active_page else "○"
                 page_label = f"   {page_marker} {page_name}"
-                if st.sidebar.button(page_label, key=widget_key("nav_page", menu_name, page_name), use_container_width=True):
+                if st.sidebar.button(page_label, key=widget_key("nav_page", menu_name, page_name), width="stretch"):
                     set_active_route(menu_name, page_name)
                     st.rerun()
 
@@ -2409,10 +3231,8 @@ if main_section == "Dashboard" and page == "Executive Summary":
     render_dashboard_summary(report)
 elif main_section == "Dashboard" and page == "Business Recommendations":
     render_business_recommendations_page(report)
-elif main_section == "Stores" and page == "View Stores":
+elif main_section == "Stores" and page == "Manage Stores":
     render_stores_view_page()
-elif main_section == "Stores" and page == "Add Store":
-    render_add_store_page()
 elif main_section == "Stores" and page == "Store Data Status":
     render_store_data_status_page()
 elif main_section == "Item-wise Sales" and page == "View Sales":

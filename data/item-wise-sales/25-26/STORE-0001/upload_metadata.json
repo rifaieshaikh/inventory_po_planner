@@ -1,0 +1,64 @@
+{
+  "store_id": "STORE-0001",
+  "store_name": "Vay Incorporates",
+  "file_type": "sales",
+  "fy": "25-26",
+  "original_file_name": "2025-2026.csv",
+  "stored_original_path": "data\\item-wise-sales\\25-26\\STORE-0001\\original\\20260629_154746_2025-2026.csv",
+  "standardized_file_path": "data\\item-wise-sales\\25-26\\STORE-0001\\item-wise-sales.csv",
+  "mapping_path": "data\\item-wise-sales\\25-26\\STORE-0001\\mapping.json",
+  "uploaded_at": "2026-06-29T15:47:46+05:30",
+  "sheet_name": null,
+  "row_count_original": 11001,
+  "row_count_cleaned": 11000,
+  "columns_original": [
+    "SlNo",
+    "Invoice No",
+    "Date",
+    "Item Name",
+    "Rate",
+    "Qty",
+    "CGST%",
+    "CGST",
+    "SGST%",
+    "SGST",
+    "IGST%",
+    "IGST",
+    "Amount"
+  ],
+  "columns_standardized": [
+    "Store ID",
+    "Store Name",
+    "FY",
+    "Item Key",
+    "Item Code / SKU",
+    "Item Name",
+    "Category / Size / Type",
+    "Sales Date",
+    "Sales Month",
+    "Sales Quantity",
+    "Selling Price",
+    "Sales Amount",
+    "Invoice Number",
+    "Customer Name",
+    "Unit",
+    "Source Row Number",
+    "Source File Name"
+  ],
+  "warnings": [
+    {
+      "Severity": "Info",
+      "Field": "Item Name",
+      "Message": "Rows marked TOTAL will be excluded.",
+      "Row Count": 1,
+      "Example Values": "Total"
+    },
+    {
+      "Severity": "Warning",
+      "Field": "Sales Quantity",
+      "Message": "Rows with blank Sales Quantity will use 0.",
+      "Row Count": 1,
+      "Example Values": ""
+    }
+  ]
+}

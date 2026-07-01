@@ -1,0 +1,19 @@
+{
+  "template_name": "VAY-ITEM-WISE-SALES",
+  "file_type": "sales",
+  "mapping": {
+    "Item Name": "Item Name",
+    "Sales Quantity": "Qty",
+    "Item Code / SKU": "Item Name",
+    "Sales Date": "Date",
+    "Sales Month": null,
+    "Category / Size / Type": null,
+    "Selling Price": "Rate",
+    "Sales Amount": "Amount",
+    "Invoice Number": "Invoice No",
+    "Customer Name": null,
+    "Unit": null
+  },
+  "created_at": "2026-06-30T00:33:24+05:30",
+  "updated_at": "2026-06-30T00:34:03+05:30"
+}
