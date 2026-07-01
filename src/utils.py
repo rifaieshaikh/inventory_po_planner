@@ -30,6 +30,49 @@ MOVEMENT_ORDER = {
 }
 RISK_ORDER = {"Urgent Stock Risk": 1, "High Stock Risk": 2, "Medium Stock Risk": 3, "Low Stock Risk": 4, "Overstock Risk": 5}
 
+NUMERIC_OUTPUT_COLUMNS = {
+    "Total Sales Qty",
+    "Overall Monthly Velocity Qty",
+    "Recent Period Sales Qty",
+    "Recent Months With Sales",
+    "Recent Monthly Velocity Qty",
+    "Weighted Velocity Qty",
+    "Velocity Percentile",
+    "Sales Frequency %",
+    "Recent Sales Frequency %",
+    "Older Avg Monthly Sales Qty",
+    "Recent Avg Monthly Sales Qty",
+    "Trend Change %",
+    "Monthly Sales Std Dev",
+    "Sales CV",
+    "Current Stock Qty",
+    "Stock Coverage Months",
+    "Recent Stock Coverage Months",
+    "Relevant Velocity Qty",
+    "Suggested Target Cover Months",
+    "Target Stock Cover",
+    "Required Stock Qty",
+    "Required Boxes",
+    "Exact Purchase Requirement Qty",
+    "Box / Pack Quantity",
+    "Rounded PO Qty",
+    "Final PO Boxes",
+    "Final PO Quantity",
+    "Stock After PO Qty",
+    "Stock Cover After PO Months",
+    "Extra Stock Due To Rounding",
+    "Extra Qty Due To Box Rounding",
+    "Purchase Price",
+    "Estimated Purchase Value",
+    "Budget Priority Score",
+    "Budget Approved PO Quantity",
+    "Budget Approved PO Value",
+    "Total Amount",
+    "Category Box Qty",
+    "Box Qty",
+    "PO Value",
+}
+
 
 def normalize_text(value: object) -> str:
     if value is None:
@@ -37,6 +80,13 @@ def normalize_text(value: object) -> str:
     text = str(value).strip().upper()
     text = re.sub(r"\s+", " ", text)
     return text
+
+
+def coerce_numeric_output_columns(df: pd.DataFrame | None) -> pd.DataFrame:
+    result = df.copy() if df is not None else pd.DataFrame()
+    for col in NUMERIC_OUTPUT_COLUMNS.intersection(result.columns):
+        result[col] = pd.to_numeric(result[col].replace("", pd.NA), errors="coerce").fillna(0)
+    return result
 
 
 def build_item_key(row) -> str:
@@ -135,4 +185,4 @@ def ensure_required_output_columns(df: pd.DataFrame) -> pd.DataFrame:
             if isinstance(default_value, str):
                 result[col] = result[col].astype(str).str.strip()
                 result[col] = result[col].replace(["", "nan", "None", "NaN"], default_value)
-    return result
+    return coerce_numeric_output_columns(result)
