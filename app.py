@@ -12,6 +12,8 @@ import pandas as pd
 import streamlit as st
 
 from src import file_manager
+from src.app.mapping_configuration_view import render_mapping_configuration_page
+from src.app.notifications import add_notification, render_notifications_page
 from src.column_mapper import (
     apply_mapping,
     detect_column_mapping,
@@ -1649,7 +1651,6 @@ def render_dashboard_summary(report: dict | None) -> None:
     render_page_header("Inventory PO Planner", "Purchase Manager Dashboard")
     if report is None:
         st.info("Run analysis from Purchase Planning -> Run Analysis.")
-        render_dashboard_mapping_configuration()
         render_data_file_status_page()
         return
     summary = report["Executive Summary"].copy()
@@ -1671,7 +1672,6 @@ def render_dashboard_summary(report: dict | None) -> None:
         render_kpi_card("PO Value", f"{float(summary_map.get('Total PO value', 0)):,.2f}")
     st.divider()
     st.dataframe(summary, width="stretch", hide_index=True)
-    render_dashboard_mapping_configuration()
 
 
 def render_business_recommendations_page(report: dict | None) -> None:
@@ -2840,7 +2840,7 @@ report = get_active_report()
 NAV_ITEMS = {
     "Dashboard": {
         "icon": "📊",
-        "pages": ["Executive Summary", "Business Recommendations"],
+        "pages": ["Executive Summary", "Business Recommendations", "Manage Mappings", "Notifications"],
     },
     "Stores": {
         "icon": "ST",
@@ -3222,15 +3222,37 @@ def render_sidebar() -> tuple[str, str]:
 
 main_section, page = render_sidebar()
 
-if report is not None:
+def queue_report_notifications(report: dict | None) -> None:
+    if report is None:
+        return
     validation = report.get("Data Validation", pd.DataFrame())
-    if not validation.empty and validation["Issue Type"].eq("Missing Supplier Name").any():
-        st.warning("Supplier name missing. Items are grouped under Unknown Supplier.")
+    if validation.empty or "Issue Type" not in validation.columns:
+        return
+    if not validation["Issue Type"].eq("Missing Supplier Name").any():
+        return
+    notification_scope = ":".join(
+        [
+            str(st.session_state.get("report_store_id", active_store_id())),
+            str(st.session_state.get("active_run_id", "")),
+            "missing_supplier_name",
+        ]
+    )
+    if st.session_state.get("last_missing_supplier_notification") == notification_scope:
+        return
+    add_notification("warning", "Supplier name missing. Items are grouped under Unknown Supplier.", context="Data Validation")
+    st.session_state["last_missing_supplier_notification"] = notification_scope
+
+
+queue_report_notifications(report)
 
 if main_section == "Dashboard" and page == "Executive Summary":
     render_dashboard_summary(report)
 elif main_section == "Dashboard" and page == "Business Recommendations":
     render_business_recommendations_page(report)
+elif main_section == "Dashboard" and page == "Manage Mappings":
+    render_mapping_configuration_page(active_store_id(), active_store_name())
+elif main_section == "Dashboard" and page == "Notifications":
+    render_notifications_page()
 elif main_section == "Stores" and page == "Manage Stores":
     render_stores_view_page()
 elif main_section == "Stores" and page == "Store Data Status":

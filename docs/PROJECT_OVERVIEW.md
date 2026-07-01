@@ -66,7 +66,7 @@ The sidebar defines these sections:
 
 | Section | Pages |
 | --- | --- |
-| Dashboard | Executive Summary, Business Recommendations |
+| Dashboard | Executive Summary, Business Recommendations, Manage Mappings, Notifications |
 | Stores | Manage Stores, Store Data Status |
 | Item-wise Sales | View Sales, Upload Sales |
 | Stock | View Stock, Upload Stock, Bulk Item Update |
