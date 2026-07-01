@@ -1,0 +1,70 @@
+{
+  "store_id": "STORE-0001",
+  "store_name": "Vay Incorporates",
+  "file_type": "stock",
+  "fy": null,
+  "original_file_name": "STOCK 26-27.csv",
+  "stored_original_path": "data\\stock\\STORE-0001\\original\\20260629_145305_STOCK 26-27.csv",
+  "standardized_file_path": "data\\stock\\STORE-0001\\stock.csv",
+  "mapping_path": "data\\stock\\STORE-0001\\mapping.json",
+  "uploaded_at": "2026-06-29T14:53:05+05:30",
+  "sheet_name": null,
+  "row_count_original": 246,
+  "row_count_cleaned": 245,
+  "columns_original": [
+    "SlNo",
+    "Item Name",
+    "P.Price",
+    "Retail",
+    "COST",
+    "Qty",
+    "Amount"
+  ],
+  "columns_standardized": [
+    "Store ID",
+    "Store Name",
+    "Item Key",
+    "Item Code / SKU",
+    "Item Name",
+    "Category / Size / Type",
+    "Current Stock Quantity",
+    "Purchase Price",
+    "Supplier Name",
+    "Unit",
+    "Box Size / Pack Size / MOQ",
+    "Stock Value",
+    "Location / Rack",
+    "Source Row Number",
+    "Source File Name"
+  ],
+  "warnings": [
+    {
+      "Severity": "Info",
+      "Field": "Item Name",
+      "Message": "Rows marked TOTAL will be excluded.",
+      "Row Count": 1,
+      "Example Values": "Total"
+    },
+    {
+      "Severity": "Info",
+      "Field": "Supplier Name",
+      "Message": "Supplier is not mapped. Unknown Supplier will be used.",
+      "Row Count": 0,
+      "Example Values": ""
+    },
+    {
+      "Severity": "Info",
+      "Field": "Category / Size / Type",
+      "Message": "Category is not mapped. Existing item category mapping or Uncategorized will be used.",
+      "Row Count": 0,
+      "Example Values": ""
+    },
+    {
+      "Severity": "Warning",
+      "Field": "Purchase Price",
+      "Message": "Blank Purchase Price will use 0.",
+      "Row Count": 1,
+      "Example Values": ""
+    }
+  ]
+}

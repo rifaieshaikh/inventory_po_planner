@@ -1,0 +1,57 @@
+{
+  "store_id": "STORE-0001",
+  "store_name": "Vay Incorporates",
+  "file_type": "sales",
+  "fy": "23-24",
+  "original_file_name": "ITE WISE 23-24.csv",
+  "stored_original_path": "data\\item-wise-sales\\23-24\\STORE-0001\\original\\20260629_154907_ITE WISE 23-24.csv",
+  "standardized_file_path": "data\\item-wise-sales\\23-24\\STORE-0001\\item-wise-sales.csv",
+  "mapping_path": "data\\item-wise-sales\\23-24\\STORE-0001\\mapping.json",
+  "uploaded_at": "2026-06-29T15:49:07+05:30",
+  "sheet_name": null,
+  "row_count_original": 3848,
+  "row_count_cleaned": 3847,
+  "columns_original": [
+    "Invoice No",
+    "Item Name",
+    "Qty",
+    "Amount",
+    "Date",
+    "Rate",
+    "CGST%",
+    "CGST",
+    "SGST%",
+    "SGST",
+    "IGST%",
+    "IGST",
+    "SlNo"
+  ],
+  "columns_standardized": [
+    "Store ID",
+    "Store Name",
+    "FY",
+    "Item Key",
+    "Item Code / SKU",
+    "Item Name",
+    "Category / Size / Type",
+    "Sales Date",
+    "Sales Month",
+    "Sales Quantity",
+    "Selling Price",
+    "Sales Amount",
+    "Invoice Number",
+    "Customer Name",
+    "Unit",
+    "Source Row Number",
+    "Source File Name"
+  ],
+  "warnings": [
+    {
+      "Severity": "Info",
+      "Field": "Item Name",
+      "Message": "Rows marked TOTAL will be excluded.",
+      "Row Count": 1,
+      "Example Values": "Total"
+    }
+  ]
+}
