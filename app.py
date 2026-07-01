@@ -2513,14 +2513,6 @@ def _mark_store_form_dialog() -> None:
     st.markdown('<span class="store-form-dialog"></span>', unsafe_allow_html=True)
 
 
-def _close_store_add_modal() -> None:
-    st.session_state["show_store_add_modal"] = False
-
-
-def _close_store_edit_modal() -> None:
-    st.session_state["edit_store_id"] = ""
-
-
 def _set_store_confirmation(action: str, store_id: str, store_name: str) -> None:
     st.session_state["show_store_add_modal"] = False
     st.session_state["edit_store_id"] = ""
@@ -2535,18 +2527,9 @@ def _clear_store_confirmation() -> None:
     st.session_state.pop("store_action_confirmation", None)
 
 
-def _render_dialog_top_close(key: str, close_action) -> None:
-    close_cols = st.columns([6, 1])
-    close_cols[0].empty()
-    if close_cols[1].button("Close", key=key, width="stretch"):
-        close_action()
-        st.rerun()
-
-
 def _render_store_add_modal() -> None:
     def body() -> None:
         _mark_store_form_dialog()
-        _render_dialog_top_close(widget_key("stores_add_modal", "top_close"), _close_store_add_modal)
         with st.form(widget_key("stores_add_modal", "form")):
             name = st.text_input("Store Name", key=widget_key("stores_add_modal", "name"))
             location = st.text_input("Location", key=widget_key("stores_add_modal", "location"))
@@ -2596,7 +2579,6 @@ def _render_store_edit_modal(store_id: str) -> None:
 
     def body() -> None:
         _mark_store_form_dialog()
-        _render_dialog_top_close(widget_key("stores_edit_modal", "top_close", store_id), _close_store_edit_modal)
         st.text_input("Store ID", value=str(current["Store ID"]), disabled=True, key=widget_key("stores_edit_modal", "store_id", store_id))
         with st.form(widget_key("stores_edit_modal", "form", store_id)):
             name = st.text_input("Store Name", value=str(current["Store Name"]), key=widget_key("stores_edit_modal", "name", store_id))
@@ -2713,7 +2695,6 @@ def _render_store_confirmation_modal() -> None:
     )
 
     def body() -> None:
-        _render_dialog_top_close(widget_key("stores_confirm", "top_close", f"{action}_{store_id}"), _clear_store_confirmation)
         st.markdown(f'<div class="store-confirm-copy">{message}</div>', unsafe_allow_html=True)
         col_a, col_b = st.columns(2)
         if col_a.button(confirm_label, type="primary", key=widget_key("stores_confirm", "confirm", f"{action}_{store_id}"), width="stretch"):
@@ -2783,8 +2764,6 @@ def render_store_data_status_page() -> None:
     sales_years = status["sales_years"]
     sales_rows = [upload_status_row("sales", store_id, store_name, fy) for fy in sales_years]
     st.dataframe(pd.DataFrame(sales_rows), hide_index=True, width="stretch")
-    st.subheader("View Mapping")
-    render_mapping_viewer(store_id, sales_years, "store_data_status")
     st.subheader("Latest Result")
     st.dataframe(
         pd.DataFrame(
