@@ -10,6 +10,15 @@ from src.domain.mapping_config import MappingConfig
 from src.infra.mapping_config_repository import MappingConfigRepository
 
 
+_MAPPING_MODAL_DEFAULTS = {
+    "show_add_stock_mapping": False,
+    "show_add_sales_mapping": False,
+    "edit_mapping_config_id": "",
+    "delete_mapping_config_id": "",
+    "copy_mapping_config_id": "",
+}
+
+
 def _service() -> MappingConfigService:
     return MappingConfigService(MappingConfigRepository())
 
@@ -72,6 +81,17 @@ def _widget_key(section: str, name: str, suffix: str = "") -> str:
         for part in parts
         if part is not None and str(part).strip() != ""
     )
+
+
+def _clear_mapping_modal_state(keep_key: str = "") -> None:
+    for key, default_value in _MAPPING_MODAL_DEFAULTS.items():
+        if key != keep_key:
+            st.session_state[key] = default_value
+
+
+def _open_mapping_modal(state_key: str, value: bool | str = True) -> None:
+    _clear_mapping_modal_state(state_key)
+    st.session_state[state_key] = value
 
 
 def _store_options() -> tuple[list[str], dict[str, str]]:
@@ -370,11 +390,11 @@ def _render_mapping_configs(configs: list[MappingConfig], empty_message: str) ->
             st.dataframe(config.to_table(), hide_index=True, width="stretch")
             action_cols = st.columns(4)
             if action_cols[0].button("Edit", key=_widget_key("mapping_config", "edit", config.config_id), width="stretch"):
-                st.session_state["edit_mapping_config_id"] = config.config_id
+                _open_mapping_modal("edit_mapping_config_id", config.config_id)
             if action_cols[1].button("Delete", key=_widget_key("mapping_config", "delete", config.config_id), width="stretch"):
-                st.session_state["delete_mapping_config_id"] = config.config_id
+                _open_mapping_modal("delete_mapping_config_id", config.config_id)
             if action_cols[2].button("Copy to Store", key=_widget_key("mapping_config", "copy", config.config_id), width="stretch"):
-                st.session_state["copy_mapping_config_id"] = config.config_id
+                _open_mapping_modal("copy_mapping_config_id", config.config_id)
             if action_cols[3].button("Use as Template", key=_widget_key("mapping_config", "template", config.config_id), width="stretch"):
                 service = _service()
                 name = f"{config.label} Copy"
@@ -384,6 +404,22 @@ def _render_mapping_configs(configs: list[MappingConfig], empty_message: str) ->
                     st.rerun()
                 except ValueError as exc:
                     st.error(str(exc))
+
+
+def _render_active_mapping_modal() -> None:
+    modal_renderers = [
+        ("delete_mapping_config_id", lambda value: _render_delete_modal(str(value))),
+        ("edit_mapping_config_id", lambda value: _render_edit_modal(str(value))),
+        ("copy_mapping_config_id", lambda value: _render_copy_modal(str(value))),
+        ("show_add_stock_mapping", lambda _value: _render_add_modal("stock")),
+        ("show_add_sales_mapping", lambda _value: _render_add_modal("sales")),
+    ]
+    for state_key, render_modal in modal_renderers:
+        value = st.session_state.get(state_key)
+        if value:
+            _clear_mapping_modal_state(state_key)
+            render_modal(value)
+            return
 
 
 def render_mapping_configuration_page(active_store_id: str, active_store_name: str) -> None:
@@ -399,22 +435,13 @@ def render_mapping_configuration_page(active_store_id: str, active_store_name: s
     stock_tab, sales_tab = st.tabs(["Stock Mapping", "Item-wise Sales Mapping"])
     with stock_tab:
         if st.button("Add Stock Mapping", type="primary", key="mapping_configuration__add_stock"):
-            st.session_state["show_add_stock_mapping"] = True
+            _open_mapping_modal("show_add_stock_mapping")
         stock_configs = service.list_stock_configs(include_all_stores=include_all_stores, active_store_id=active_store_id)
         _render_mapping_configs(stock_configs, "No saved stock mapping configuration found.")
     with sales_tab:
         if st.button("Add Item-wise Sales Mapping", type="primary", key="mapping_configuration__add_sales"):
-            st.session_state["show_add_sales_mapping"] = True
+            _open_mapping_modal("show_add_sales_mapping")
         sales_configs = service.list_sales_configs(include_all_stores=include_all_stores, active_store_id=active_store_id)
         _render_mapping_configs(sales_configs, "No saved item-wise sales mapping configuration found.")
 
-    if st.session_state.get("show_add_stock_mapping"):
-        _render_add_modal("stock")
-    if st.session_state.get("show_add_sales_mapping"):
-        _render_add_modal("sales")
-    if st.session_state.get("edit_mapping_config_id"):
-        _render_edit_modal(str(st.session_state["edit_mapping_config_id"]))
-    if st.session_state.get("delete_mapping_config_id"):
-        _render_delete_modal(str(st.session_state["delete_mapping_config_id"]))
-    if st.session_state.get("copy_mapping_config_id"):
-        _render_copy_modal(str(st.session_state["copy_mapping_config_id"]))
+    _render_active_mapping_modal()
